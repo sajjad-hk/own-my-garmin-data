@@ -1,0 +1,38 @@
+name: garmin-sync
+
+on:
+  schedule:
+    - cron: '0 6 * * *'   # daily 06:00 UTC — adjust to your timezone
+  workflow_dispatch: {}    # manual "Run workflow" button in the Actions tab
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r ingestion/requirements.txt
+
+      - name: Run Garmin sync (with retry)
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 5
+          max_attempts: 3
+          retry_wait_seconds: 30
+          command: python ingestion/pull.py
+        env:
+          DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          curl -s -X POST "https://ntfy.sh/${{ secrets.NTFY_TOPIC }}" \
+            -d "Garmin sync failed after retries — check the Actions log"

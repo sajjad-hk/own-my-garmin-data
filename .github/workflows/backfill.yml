@@ -1,0 +1,47 @@
+name: garmin-backfill
+
+on:
+  workflow_dispatch:
+    inputs:
+      backfill_start_date:
+        description: >
+          Backfill daily metrics/training insight from this date (YYYY-MM-DD).
+          Leave blank for the default (2 years ago). Activities, weigh-ins,
+          and body battery always backfill in full regardless of this.
+        required: false
+        type: string
+
+concurrency:
+  group: garmin-backfill
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    # Full history is thousands of API calls with deliberate pacing —
+    # expect hours, not minutes. Safe to just re-run this workflow if it
+    # hits this timeout: backfill.py skips dates it already has.
+    timeout-minutes: 350
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r ingestion/requirements.txt
+
+      - name: Run Garmin backfill
+        run: python backfill.py
+        env:
+          DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
+          BACKFILL_START_DATE: ${{ inputs.backfill_start_date }}
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          curl -s -X POST "https://ntfy.sh/${{ secrets.NTFY_TOPIC }}" \
+            -d "Garmin backfill failed — check the Actions log. Safe to re-run; it resumes."

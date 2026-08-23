@@ -1,0 +1,3 @@
+garminconnect
+psycopg[binary]
+python-dotenv
