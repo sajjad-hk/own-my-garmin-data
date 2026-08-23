@@ -32,7 +32,7 @@ import time
 from datetime import date, timedelta
 
 import psycopg
-from garminconnect import Garmin
+from garminconnect import Garmin, GarminConnectConnectionError
 
 from bootstrap.garmin_auth import TOKEN_DIR, load_token_from_db, save_token_to_db
 
@@ -156,11 +156,26 @@ BODY_BATTERY_CHUNK_DAYS = 28
 def backfill_range_endpoint(
     client, start: date, today: date, label: str, fetch_and_upsert, chunk_days: int = RANGE_CHUNK_DAYS
 ) -> None:
+    # chunk_days is a guess at each backend's undocumented server-side max
+    # range — it has already been wrong once (see BODY_BATTERY_CHUNK_DAYS's
+    # history). Rather than guess a new constant, shrink on the actual
+    # "requested date range is too big" 400 and keep the smaller size for
+    # subsequent chunks, so this endpoint stops needing a hand-tuned number.
     print(f"Backfilling {label} from {start} to {today}...")
     chunk_start = start
     while chunk_start <= today:
         chunk_end = min(chunk_start + timedelta(days=chunk_days - 1), today)
-        fetch_and_upsert(client, chunk_start.isoformat(), chunk_end.isoformat())
+        while True:
+            try:
+                fetch_and_upsert(client, chunk_start.isoformat(), chunk_end.isoformat())
+                break
+            except GarminConnectConnectionError as e:
+                if "too big" not in str(e).lower() or chunk_end == chunk_start:
+                    raise
+                chunk_days = max(1, (chunk_end - chunk_start).days // 2)
+                chunk_end = chunk_start + timedelta(days=chunk_days - 1)
+                print(f"  ...{label} range too big, shrinking chunk to {chunk_days} days and retrying")
+                time.sleep(1)
         chunk_start = chunk_end + timedelta(days=1)
         time.sleep(1)
     print(f"  -> {label} done.")
