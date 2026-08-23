@@ -139,16 +139,27 @@ def upsert_weigh_ins(conn: psycopg.Connection, weigh_in_response: dict) -> None:
         upsert_daily_metrics(conn, d, {"weigh_in": summary})
 
 
-# Chunk size for range endpoints (weigh-ins, body battery) during backfill —
-# keeps individual requests small rather than asking for years in one call.
+# Chunk size for range endpoints during backfill — keeps individual requests
+# small rather than asking for years in one call. weigh-ins (weight-service)
+# and body battery (wellness-service) are different backends with different
+# server-side max-range limits — a single shared constant caused
+# `API Error 400 - requested date range is too big` on body battery once a
+# real 2-year backfill exercised a range that large (weigh-ins' 90-day
+# chunks succeeded against the same account/run; body battery didn't).
+# Garmin Connect's own UI caps body battery charting at 4 weeks
+# (https://forums.garmin.com/apps-software/mobile-apps-web/f/garmin-connect-web/351559/displaying-body-battery-for-more-than-4weeks),
+# so 28 days per chunk stays safely under whatever the API enforces.
 RANGE_CHUNK_DAYS = 90
+BODY_BATTERY_CHUNK_DAYS = 28
 
 
-def backfill_range_endpoint(client, start: date, today: date, label: str, fetch_and_upsert) -> None:
+def backfill_range_endpoint(
+    client, start: date, today: date, label: str, fetch_and_upsert, chunk_days: int = RANGE_CHUNK_DAYS
+) -> None:
     print(f"Backfilling {label} from {start} to {today}...")
     chunk_start = start
     while chunk_start <= today:
-        chunk_end = min(chunk_start + timedelta(days=RANGE_CHUNK_DAYS - 1), today)
+        chunk_end = min(chunk_start + timedelta(days=chunk_days - 1), today)
         fetch_and_upsert(client, chunk_start.isoformat(), chunk_end.isoformat())
         chunk_start = chunk_end + timedelta(days=1)
         time.sleep(1)
@@ -179,6 +190,7 @@ def main() -> None:
         backfill_range_endpoint(
             client, start, today, "body battery",
             lambda c, s, e: upsert_body_battery(conn, c.get_body_battery(s, e)),
+            chunk_days=BODY_BATTERY_CHUNK_DAYS,
         )
 
         total_days = (today - start).days + 1
