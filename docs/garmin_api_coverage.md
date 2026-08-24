@@ -10,6 +10,31 @@ expansion — it was created from scratch by listing `dir(garminconnect.Garmin)`
 `backfill.py`. Keep it in sync going forward: when you wire in a new
 method, move it out of "Not used yet" and into "Currently ingested".
 
+## Data domains
+
+Every method in "Currently ingested" below is owned by exactly one domain
+in `domains.py`, the single source of truth for what gets pulled. Each
+domain has its own `sync_incremental` (incremental lookback pull) and,
+where it has history to backfill, its own `backfill` routine with
+independent skip-detection — see that file for the full mapping. Domains
+are enabled per-install via `sync_config.enabled_domains` in the DB, set
+by `install.py`'s checklist at first-time setup and adjustable later with
+`install.py --upgrade`.
+
+| Domain | Default | Owns |
+|---|---|---|
+| `activities` | on | `activities` table |
+| `wellness` | on | `daily_metrics` (all columns except `weigh_in`) |
+| `body_composition` | on | `daily_metrics.weigh_in` |
+| `training` | on | `training_insight`, `performance_snapshots`, `personal_records` |
+| `challenges` | on | `challenges`, `earned_badges`, `available_badges` |
+| `profile` | on | `user_profile`, `goals` |
+| `reproductive` | off (not yet implemented) | menstrual calendar / pregnancy data — gated on a live probe, see the plan doc |
+
+Schema for each domain lives in its own `-- domain: <key>`-tagged file
+under `schema/migrations/`, applied only when that domain is enabled —
+`schema/init.sql` is frozen and no longer executed by any code path.
+
 ## Currently ingested
 
 Every field name below was confirmed against a live API response before

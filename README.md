@@ -52,6 +52,34 @@ Push this repo to your own GitHub account (make your own copy/fork, not a
 shared one) *before* running `install.py`, so it can detect the repo and set
 its secrets automatically.
 
+### Choosing what gets synced
+
+`install.py` asks which data domains to sync (activities, daily wellness,
+body composition, training & performance, challenges & badges, profile —
+all on by default) and stores the choice in the database itself
+(`sync_config.enabled_domains`), so both your local wizard and the GitHub
+Actions runners see the same selection without a new secret.
+`reproductive` health (menstrual calendar, pregnancy) exists in the
+registry but isn't implemented yet — it stays off until its endpoints are
+verified against a live account, and isn't offered in the checklist until
+then.
+
+Non-interactive setup: `uv run install.py --domains activities,wellness,training`
+(or set `GARMIN_DOMAINS`).
+
+### Adding domains later
+
+Already set up and want to turn on something new (or pick up new data
+that landed inside a domain you already have)? Run:
+
+```bash
+uv run install.py --upgrade
+```
+
+It shows what's new, lets you adjust your domain selection, applies any
+pending schema, and triggers a backfill scoped to just what you added —
+existing domains and data are untouched.
+
 ### Re-authenticating later
 
 If you ever change your Garmin password (or a token just stops working),
@@ -64,11 +92,24 @@ uv run install.py --reauth
 ### Prefer to do it by hand?
 
 Each piece the wizard automates is also runnable individually —
-`uv run apply_schema.py`, `uv run bootstrap/generate_token.py`,
+`uv run apply_schema.py` (see "Schema" below — the bare command only
+applies base tables; use `install.py`/`install.py --upgrade` to also
+apply your chosen domains' migrations),
+`uv run bootstrap/generate_token.py`,
 `uv run bootstrap/load_token_to_db.py`, `uv run ingestion/pull.py` (a
 one-off incremental pull, same code the daily sync runs), `uv run
 backfill.py` (full history — expect hours, safe to stop/resume), and
 `.github/workflows/backfill.yml` (trigger it from the Actions tab).
+
+### Schema
+
+`apply_schema.py` now runs the migration files under `schema/migrations/`
+(each tagged to one domain) instead of a single `schema/init.sql` — see
+`docs/garmin_api_coverage.md`'s "Data domains" section. Run bare, it
+only applies the base migration (`auth_tokens`, `sync_config`,
+`schema_migrations`); applying a domain's tables requires passing your
+enabled domains, which `install.py` and `install.py --upgrade` do for
+you.
 
 ---
 
@@ -101,7 +142,7 @@ limit 14;
 
 Most tables here store Garmin's raw JSON response in a `jsonb` column
 (`raw` on `activities`, `stats`/`sleep`/`hrv`/etc. on `daily_metrics`) —
-see `schema/init.sql` for the full table list and
+see `schema/migrations/` for the full table list and
 `docs/garmin_api_coverage.md` for what each Garmin API method maps to.
 Postgres's `->>` (get JSON field as text) and `->` (get JSON field as
 JSON) operators let you reach into those payloads from plain SQL.
@@ -149,7 +190,7 @@ retry after a failure — from the **Actions** tab → `garmin-backfill` →
 |---|---|
 | `uv: command not found` | Re-run the install line for your OS from "What you'll need," then open a new terminal |
 | `KeyError: 'DATABASE_URL'` | `.env` isn't set up — re-run `uv run install.py`, or set `DATABASE_URL` yourself |
-| `relation "..." does not exist` | Re-run `DATABASE_URL="..." uv run apply_schema.py` |
+| `relation "..." does not exist` | Re-run `uv run install.py --upgrade` to apply any pending migrations for your enabled domains (bare `apply_schema.py` only applies base tables) |
 | `429` / rate limited during login | Wait a few minutes before retrying — Garmin temporarily blocks repeated login attempts |
 | `MFA Required` | Your account has two-factor enabled; `install.py`/`generate_token.py` will prompt for the code — make sure you're ready to receive it |
 | `gh: command not found` / not authenticated | Install `gh` and run `gh auth login`, then re-run `uv run install.py` — or follow the manual secret-setup instructions it prints |
