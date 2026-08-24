@@ -100,14 +100,20 @@ def check_backfill_status() -> dict:
     return check_workflow_status(BACKFILL_WORKFLOW_FILE)
 
 
-def trigger_backfill(backfill_start_date: str | None = None) -> dict:
+def trigger_backfill(backfill_start_date: str | None = None, domains: set[str] | list[str] | None = None) -> dict:
     """Trigger the full-history backfill workflow right now. `backfill_start_date`
     (YYYY-MM-DD) is passed through as the workflow's input; omit for its
     default (2 years back for daily metrics — activities/weigh-ins/body
-    battery always backfill in full regardless). Refuses if a backfill run
-    is already queued/in progress."""
-    inputs = {"backfill_start_date": backfill_start_date} if backfill_start_date else None
-    result = trigger_workflow(BACKFILL_WORKFLOW_FILE, inputs=inputs)
+    battery always backfill in full regardless). `domains` restricts the
+    run to those domain keys (comma-joined as the workflow's `domains`
+    input); omit to backfill every domain sync_config has enabled. Refuses
+    if a backfill run is already queued/in progress."""
+    inputs: dict = {}
+    if backfill_start_date:
+        inputs["backfill_start_date"] = backfill_start_date
+    if domains:
+        inputs["domains"] = ",".join(sorted(domains))
+    result = trigger_workflow(BACKFILL_WORKFLOW_FILE, inputs=inputs or None)
     if result.get("triggered"):
         result["note"] = (
             "Backfill started — this pulls years of history and can take a "
