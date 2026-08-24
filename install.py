@@ -331,11 +331,11 @@ def run_setup(domains_override: set[str] | None = None) -> None:
     preselected = {d.key for d in DOMAINS if d.default_enabled}
     selected_domains = domains_override if domains_override is not None else _prompt_domain_checklist(preselected)
 
-    with psycopg.connect(database_url) as conn:
-        set_enabled_domains(conn, selected_domains)
-
     applied = apply_migrations(database_url, enabled_domains=selected_domains)
     console.print(f"[green]✓[/green] Schema applied ({len(applied)} migration(s)).")
+
+    with psycopg.connect(database_url) as conn:
+        set_enabled_domains(conn, selected_domains)
 
     console.print("\n[bold]Garmin login[/bold]")
     interactive_login()
@@ -467,10 +467,11 @@ def run_upgrade(domains_override: set[str] | None = None) -> None:
 
     selected_domains = domains_override if domains_override is not None else _prompt_domain_checklist(current_enabled)
 
+    applied = apply_migrations(database_url, enabled_domains=selected_domains)
+
     with psycopg.connect(database_url) as conn:
         set_enabled_domains(conn, selected_domains)
 
-    applied = apply_migrations(database_url, enabled_domains=selected_domains)
     if applied:
         console.print(f"[green]✓[/green] Applied {len(applied)} migration(s): {', '.join(applied)}")
     else:
