@@ -125,9 +125,17 @@ class _StubGarminClient:
 
 
 def test_disabled_domain_not_pulled() -> None:
+    # Enable every default domain except body_composition, and drive
+    # domain selection the same way ingestion/pull.py's real main() does
+    # (`for domain in DOMAINS: if domain.key in enabled: ...`) rather than
+    # hand-picking a single domain — this is what exercises
+    # upsert_daily_metrics via the real wellness path against a
+    # daily_metrics table that a genuinely disabled sibling domain
+    # (body_composition) never got its own migration applied for.
     with psycopg.connect(DB_URL) as conn:
         _reset_db(conn)
-    apply_migrations(DB_URL, enabled_domains={"activities"})
+    enabled = {"activities", "wellness", "training", "challenges", "profile"}
+    apply_migrations(DB_URL, enabled_domains=enabled)
 
     stub = _StubGarminClient()
     with psycopg.connect(DB_URL) as conn:
@@ -136,12 +144,16 @@ def test_disabled_domain_not_pulled() -> None:
             window_start=date.today() - timedelta(days=1), today=date.today(),
         )
         for domain in DOMAINS:
-            if domain.key == "activities":
+            if domain.key in enabled:
                 domain.sync_incremental(ctx)
         conn.commit()
 
-    wellness_endpoints = {"get_stats", "get_sleep_data", "get_all_day_stress", "get_hrv_data"}
-    assert not (wellness_endpoints & set(stub.calls)), f"wellness endpoints were called: {stub.calls}"
+        row = conn.execute(
+            "select stats is not null from daily_metrics where metric_date = %s", (date.today(),)
+        ).fetchone()
+        assert row and row[0], "wellness sync should have written stats to daily_metrics"
+
+    assert "get_weigh_ins" not in stub.calls, f"disabled body_composition endpoint was called: {stub.calls}"
     print("test_disabled_domain_not_pulled: PASS")
 
 
