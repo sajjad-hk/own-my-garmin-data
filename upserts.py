@@ -39,9 +39,24 @@ def upsert_activities(conn: psycopg.Connection, activities: list[dict]) -> None:
 def upsert_daily_metrics(conn: psycopg.Connection, d: date, fields: dict) -> None:
     # coalesce(excluded.x, daily_metrics.x): a column not passed this call
     # (fields.get(...) is None) keeps whatever was already stored, rather
-    # than nulling it out. Every call site must pass the *same* set of keys
-    # for this to stay predictable.
-    cols = DAILY_METRICS_COLUMNS
+    # than nulling it out.
+    #
+    # The column list is built from fields.keys() (validated below against
+    # DAILY_METRICS_COLUMNS, the whitelist of every known daily_metrics
+    # column) rather than the full constant, because daily_metrics is
+    # split across two migrations (0003_wellness.sql,
+    # 0004_body_composition.sql) — an install that only enabled one of
+    # those two domains doesn't have every column in DAILY_METRICS_COLUMNS,
+    # so unconditionally referencing all of them would break with
+    # UndefinedColumn on a fresh subset install. Referencing only the keys
+    # the caller actually passed means each call only ever touches columns
+    # owned by the domain that's calling it.
+    if not fields:
+        return
+    unknown = set(fields) - set(DAILY_METRICS_COLUMNS)
+    if unknown:
+        raise ValueError(f"upsert_daily_metrics got unknown field(s): {sorted(unknown)}")
+    cols = list(fields.keys())
     values = [json.dumps(fields.get(c)) if fields.get(c) is not None else None for c in cols]
     set_clause = ", ".join(f"{c} = coalesce(excluded.{c}, daily_metrics.{c})" for c in cols)
     conn.execute(
