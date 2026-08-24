@@ -13,13 +13,12 @@ anything — see PRE_MIGRATIONS_DOMAINS below.
 Usage:
     DATABASE_URL="postgresql://..." uv run apply_schema.py
 """
+import json
 import os
 import pathlib
 import re
 
 import psycopg
-
-from config import set_enabled_domains
 
 MIGRATIONS_DIR = pathlib.Path(__file__).resolve().parent / "schema" / "migrations"
 
@@ -98,6 +97,16 @@ def _needs_adoption(conn: psycopg.Connection) -> bool:
 
 
 def _adopt_existing_db(conn: psycopg.Connection) -> set[str]:
+    """Stamp every pre-migrations table's version as applied AND write the
+    adopted enabled_domains to sync_config, both uncommitted on the
+    caller's connection. Deliberately does not call config.set_enabled_domains
+    (which commits internally) or commit here itself — the caller must
+    commit both writes together in one transaction. If a crash split these
+    into two commits, a resumed adoption run would see schema_migrations
+    already populated (_needs_adoption() -> False) and skip adoption
+    forever, leaving sync_config.enabled_domains empty and silently
+    disabling every domain for that install."""
+    adopted_domains = set(PRE_MIGRATIONS_DOMAINS)
     for version, domain, name in list_migrations():
         if domain != "base" and domain not in PRE_MIGRATIONS_DOMAINS:
             continue  # e.g. reproductive — did not exist pre-migrations
@@ -105,7 +114,15 @@ def _adopt_existing_db(conn: psycopg.Connection) -> set[str]:
             "insert into schema_migrations (version, name) values (%s, %s) on conflict (version) do nothing",
             (version, name),
         )
-    return set(PRE_MIGRATIONS_DOMAINS)
+    conn.execute(
+        """
+        insert into sync_config (key, value, updated_at)
+        values ('enabled_domains', %s, now())
+            on conflict (key) do update set value = excluded.value, updated_at = now()
+        """,
+        (json.dumps(sorted(adopted_domains)),),
+    )
+    return adopted_domains
 
 
 def apply_migrations(url: str, enabled_domains: set[str] | None = None) -> list[str]:
@@ -121,9 +138,8 @@ def apply_migrations(url: str, enabled_domains: set[str] | None = None) -> list[
         conn.commit()
 
         if _needs_adoption(conn):
-            adopted_domains = _adopt_existing_db(conn)
+            _adopt_existing_db(conn)
             conn.commit()
-            set_enabled_domains(conn, adopted_domains)
 
         applied_now = {row[0] for row in conn.execute("select version from schema_migrations").fetchall()}
 
