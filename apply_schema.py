@@ -33,6 +33,14 @@ _DOMAIN_TAG_RE = re.compile(r"^--\s*domain:\s*(\S+)", re.MULTILINE)
 # note for why this must not be inferred from data presence).
 PRE_MIGRATIONS_DOMAINS = {"activities", "wellness", "body_composition", "training", "challenges", "profile"}
 
+# The exact migration versions that reproduced schema/init.sql (the
+# pre-migrations schema) when this adoption logic was written. This set
+# must NEVER grow — a future migration for an already-adopted domain
+# (e.g. new challenges-in-progress tables) must NOT be silently stamped
+# as applied without running; it needs to actually execute so the new
+# tables get created. Adding to this set defeats that on purpose.
+PRE_MIGRATIONS_VERSIONS = {1, 2, 3, 4, 5, 6, 7}
+
 
 def _migration_files() -> list[pathlib.Path]:
     return sorted(MIGRATIONS_DIR.glob("*.sql"))
@@ -107,9 +115,9 @@ def _adopt_existing_db(conn: psycopg.Connection) -> set[str]:
     forever, leaving sync_config.enabled_domains empty and silently
     disabling every domain for that install."""
     adopted_domains = set(PRE_MIGRATIONS_DOMAINS)
-    for version, domain, name in list_migrations():
-        if domain != "base" and domain not in PRE_MIGRATIONS_DOMAINS:
-            continue  # e.g. reproductive — did not exist pre-migrations
+    for version, _domain, name in list_migrations():
+        if version not in PRE_MIGRATIONS_VERSIONS:
+            continue  # a migration added after adoption logic was written — must actually run, not be stamped
         conn.execute(
             "insert into schema_migrations (version, name) values (%s, %s) on conflict (version) do nothing",
             (version, name),
