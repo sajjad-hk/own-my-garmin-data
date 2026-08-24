@@ -22,7 +22,9 @@ Optional env vars:
                           controls how far back the per-day loop goes —
                           ~20 API calls per day now (wellness + training
                           insight, not just stats/sleep/stress/hrv/VO2max),
-                          so 2 years means ~14,600 requests. Expect this to
+                          so 2 years means ~14,600 requests, assuming all
+                          domains are enabled — fewer for a domain-scoped
+                          run (see BACKFILL_DOMAINS below). Expect this to
                           take a few hours; it's safe to stop and resume.
     BACKFILL_DOMAINS     Comma-separated domain keys (see domains.py). Blank
                           or unset backfills every enabled domain that has a
@@ -53,11 +55,6 @@ START_DATE = os.environ.get("BACKFILL_START_DATE") or DEFAULT_START
 
 def main() -> None:
     with psycopg.connect(DB_URL) as conn:
-        load_token_from_db(conn)
-
-        client = Garmin()
-        client.login(tokenstore=str(TOKEN_DIR))
-
         enabled = get_enabled_domains(conn)
         # Blank/unset BACKFILL_DOMAINS falls through to "all enabled" — same
         # pattern as START_DATE above (`or ""`, not `.get(key, default)`),
@@ -68,12 +65,23 @@ def main() -> None:
 
         start = date.fromisoformat(START_DATE)
         today = date.today()
-        ctx = BackfillContext(client=client, conn=conn, start_date=start, today=today)
 
         domains_to_run = [d for d in DOMAINS if d.key in target_keys and d.backfill is not None]
         if not domains_to_run:
             print("No domains selected for backfill (none enabled, or none have a backfill routine).")
             return
+
+        # Only touch the token/network once we know there's actual work to do —
+        # load_token_from_db/login can refresh the on-disk token, and skipping
+        # save_token_to_db below on a no-op run would silently discard that
+        # refresh (load_token_from_db overwrites TOKEN_DIR from the DB on every
+        # run, including the next one).
+        load_token_from_db(conn)
+
+        client = Garmin()
+        client.login(tokenstore=str(TOKEN_DIR))
+
+        ctx = BackfillContext(client=client, conn=conn, start_date=start, today=today)
 
         for domain in domains_to_run:
             print(f"=== Backfilling domain: {domain.key} ===")
