@@ -37,8 +37,10 @@ import questionary
 from rich.console import Console
 from rich.panel import Panel
 
-from apply_schema import apply_schema
+from apply_schema import apply_schema, apply_migrations, applied_versions, list_migrations
 from bootstrap.garmin_auth import interactive_login, save_token_to_db
+from config import get_enabled_domains, set_enabled_domains
+from domains import DOMAINS, DOMAINS_BY_KEY, Domain
 
 console = Console()
 
@@ -154,6 +156,37 @@ def _print_manual_secret_instructions(database_url: str) -> None:
     ))
 
 
+def _parse_domains_arg(raw: str) -> set[str]:
+    keys = {k.strip() for k in raw.split(",") if k.strip()}
+    unknown = keys - DOMAINS_BY_KEY.keys()
+    if unknown:
+        console.print(
+            f"[red]Unknown domain(s): {', '.join(sorted(unknown))}. "
+            f"Valid: {', '.join(d.key for d in DOMAINS)}[/red]"
+        )
+        sys.exit(1)
+    return keys
+
+
+def _prompt_domain_checklist(preselected: set[str]) -> set[str]:
+    choices = []
+    last_category = None
+    for d in DOMAINS:
+        if d.category != last_category:
+            choices.append(questionary.Separator(f"-- {d.category} --"))
+            last_category = d.category
+        choices.append(questionary.Choice(
+            title=f"{d.label} — {d.description}",
+            value=d.key,
+            checked=d.key in preselected,
+        ))
+    selected = questionary.checkbox("Which data domains should this sync?", choices=choices).ask()
+    if selected is None:
+        console.print("[red]Setup cancelled.[/red]")
+        sys.exit(1)
+    return set(selected)
+
+
 def _check_requirements() -> None:
     """Show a pass/warn checklist for the tools this wizard shells out to,
     and let the user bail out *before* spending time on DB setup + Garmin
@@ -208,7 +241,7 @@ def _check_requirements() -> None:
     console.print()
 
 
-def run_setup() -> None:
+def run_setup(domains_override: set[str] | None = None) -> None:
     console.print(Panel.fit(
         "[bold]garmin-data setup[/bold]\n\n"
         "This will: connect to your Neon database, log you in to Garmin, "
@@ -225,9 +258,18 @@ def run_setup() -> None:
     database_url = _prompt_db_url("Neon connection string (DATABASE_URL)", "DATABASE_URL", existing)
     _check_connection(database_url, "DATABASE_URL")
 
-    console.print("\n[bold]Applying schema...[/bold]")
+    console.print("\n[bold]Applying base schema...[/bold]")
     apply_schema(database_url)
-    console.print("[green]✓[/green] Schema applied.")
+
+    console.print("\n[bold]Choose data domains[/bold]")
+    preselected = {d.key for d in DOMAINS if d.default_enabled}
+    selected_domains = domains_override if domains_override is not None else _prompt_domain_checklist(preselected)
+
+    with psycopg.connect(database_url) as conn:
+        set_enabled_domains(conn, selected_domains)
+
+    applied = apply_migrations(database_url, enabled_domains=selected_domains)
+    console.print(f"[green]✓[/green] Schema applied ({len(applied)} migration(s)).")
 
     console.print("\n[bold]Garmin login[/bold]")
     interactive_login()
@@ -281,7 +323,7 @@ def run_setup() -> None:
 
         from workflow_tools import check_backfill_status, trigger_backfill  # lazy: needs GITHUB_TOKEN/GITHUB_REPO in os.environ first
 
-        result = trigger_backfill(start_date.strip() or None)
+        result = trigger_backfill(start_date.strip() or None, domains=selected_domains)
         if result.get("triggered"):
             status = check_backfill_status()
             console.print(Panel.fit(
@@ -336,13 +378,20 @@ def run_reauth() -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--reauth", action="store_true", help="Re-authenticate to Garmin only, skip full setup.")
+    parser.add_argument(
+        "--domains", type=str, default=None,
+        help="Comma-separated domain keys (see domains.py), bypasses the interactive checklist. Also settable via GARMIN_DOMAINS.",
+    )
     args = parser.parse_args()
+
+    raw_domains = args.domains or os.environ.get("GARMIN_DOMAINS")
+    domains_override = _parse_domains_arg(raw_domains) if raw_domains else None
 
     try:
         if args.reauth:
             run_reauth()
         else:
-            run_setup()
+            run_setup(domains_override=domains_override)
     except KeyboardInterrupt:
         console.print("\n[yellow]Cancelled.[/yellow]")
         sys.exit(1)
