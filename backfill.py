@@ -35,6 +35,7 @@ import psycopg
 from garminconnect import Garmin, GarminConnectConnectionError
 
 from bootstrap.garmin_auth import TOKEN_DIR, load_token_from_db, save_token_to_db
+from upserts import upsert_activities, upsert_body_battery, upsert_daily_metrics, upsert_training_insight, upsert_weigh_ins
 
 DB_URL = os.environ["DATABASE_URL"]
 
@@ -47,19 +48,6 @@ START_DATE = os.environ.get("BACKFILL_START_DATE") or DEFAULT_START
 # Very early date — Garmin accounts don't predate this, so this safely
 # captures "everything" without needing to know the real account creation date.
 ACTIVITY_HISTORY_START = "2000-01-01"
-
-
-def upsert_activities(conn: psycopg.Connection, activities: list[dict]) -> None:
-    for a in activities:
-        conn.execute(
-            """
-            insert into activities (activity_id, raw, started_at)
-            values (%s, %s, %s)
-            on conflict (activity_id) do update set raw = excluded.raw
-            """,
-            (a["activityId"], json.dumps(a), a.get("startTimeLocal")),
-        )
-    conn.commit()
 
 
 def already_backfilled(conn: psycopg.Connection, d: date) -> bool:
@@ -77,66 +65,6 @@ def already_backfilled(conn: psycopg.Connection, d: date) -> bool:
         (d,),
     ).fetchone()
     return bool(row and row[0])
-
-
-DAILY_METRICS_COLUMNS = [
-    "stats", "sleep", "stress", "hrv", "max_metrics",
-    "respiration", "spo2", "body_battery", "body_battery_events",
-    "intensity_minutes", "floors", "steps_intraday", "heart_rates",
-    "day_events", "weigh_in",
-]
-
-
-def upsert_daily_metrics(conn: psycopg.Connection, d: date, fields: dict) -> None:
-    # Identical to ingestion/pull.py's version — keep the two in lockstep.
-    # coalesce(excluded.x, daily_metrics.x): a column not passed this call
-    # keeps whatever was already stored, rather than nulling it out.
-    cols = DAILY_METRICS_COLUMNS
-    values = [json.dumps(fields.get(c)) if fields.get(c) is not None else None for c in cols]
-    set_clause = ", ".join(f"{c} = coalesce(excluded.{c}, daily_metrics.{c})" for c in cols)
-    conn.execute(
-        f"""
-        insert into daily_metrics (metric_date, {", ".join(cols)}, updated_at)
-        values (%s, {", ".join(["%s"] * len(cols))}, now())
-            on conflict (metric_date) do update set
-            {set_clause},
-            updated_at = now()
-        """,  # noqa: S608 (fixed column names, not user input)
-        (d, *values),
-    )
-    conn.commit()
-
-
-def upsert_training_insight(conn: psycopg.Connection, d: date, fields: dict) -> None:
-    # Identical to ingestion/pull.py's version — keep the two in lockstep.
-    cols = [
-        "training_status", "training_readiness", "morning_training_readiness",
-        "endurance_score", "hill_score", "fitness_age", "running_tolerance",
-    ]
-    values = [json.dumps(fields.get(c)) for c in cols]
-    set_clause = ", ".join(f"{c} = excluded.{c}" for c in cols)
-    conn.execute(
-        f"""
-        insert into training_insight (metric_date, {", ".join(cols)}, updated_at)
-        values (%s, {", ".join(["%s"] * len(cols))}, now())
-            on conflict (metric_date) do update set
-            {set_clause},
-            updated_at = now()
-        """,  # noqa: S608 (fixed column names, not user input)
-        (d, *values),
-    )
-    conn.commit()
-
-
-def upsert_body_battery(conn: psycopg.Connection, days: list[dict]) -> None:
-    for entry in days:
-        upsert_daily_metrics(conn, date.fromisoformat(entry["date"]), {"body_battery": entry})
-
-
-def upsert_weigh_ins(conn: psycopg.Connection, weigh_in_response: dict) -> None:
-    for summary in weigh_in_response.get("dailyWeightSummaries", []):
-        d = date.fromisoformat(summary["summaryDate"])
-        upsert_daily_metrics(conn, d, {"weigh_in": summary})
 
 
 # Chunk size for range endpoints during backfill — keeps individual requests

@@ -45,6 +45,7 @@ from garminconnect import Garmin
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from bootstrap.garmin_auth import TOKEN_DIR, load_token_from_db, save_token_to_db
+from upserts import upsert_activities, upsert_body_battery, upsert_daily_metrics, upsert_training_insight, upsert_weigh_ins
 
 load_dotenv()  # reads .env in the current directory into os.environ, if present
 
@@ -67,19 +68,6 @@ def write_step_summary(lines: list[str]) -> None:
             f.write(text)
     else:
         print(text)  # local run — no GITHUB_STEP_SUMMARY file, just print instead
-
-
-def upsert_activities(conn: psycopg.Connection, activities: list[dict]) -> None:
-    for a in activities:
-        conn.execute(
-            """
-            insert into activities (activity_id, raw, started_at)
-            values (%s, %s, %s)
-                on conflict (activity_id) do update set raw = excluded.raw
-            """,
-            (a["activityId"], json.dumps(a), a.get("startTimeLocal")),
-        )
-    conn.commit()
 
 
 def upsert_challenges(conn: psycopg.Connection, challenges: list[dict]) -> None:
@@ -118,55 +106,6 @@ def upsert_available_badges(conn: psycopg.Connection, badges: list[dict]) -> Non
             """,
             (b["badgeId"], json.dumps(b)),
         )
-    conn.commit()
-
-
-DAILY_METRICS_COLUMNS = [
-    "stats", "sleep", "stress", "hrv", "max_metrics",
-    "respiration", "spo2", "body_battery", "body_battery_events",
-    "intensity_minutes", "floors", "steps_intraday", "heart_rates",
-    "day_events", "weigh_in",
-]
-
-
-def upsert_daily_metrics(conn: psycopg.Connection, d: date, fields: dict) -> None:
-    # coalesce(excluded.x, daily_metrics.x): a column not passed this call
-    # (fields.get(...) is None) keeps whatever was already stored, rather
-    # than nulling it out. Every call site must pass the *same* set of keys
-    # for this to stay predictable — see backfill.py's identical function.
-    cols = DAILY_METRICS_COLUMNS
-    values = [json.dumps(fields.get(c)) if fields.get(c) is not None else None for c in cols]
-    set_clause = ", ".join(f"{c} = coalesce(excluded.{c}, daily_metrics.{c})" for c in cols)
-    conn.execute(
-        f"""
-        insert into daily_metrics (metric_date, {", ".join(cols)}, updated_at)
-        values (%s, {", ".join(["%s"] * len(cols))}, now())
-            on conflict (metric_date) do update set
-            {set_clause},
-            updated_at = now()
-        """,  # noqa: S608 (fixed column names, not user input)
-        (d, *values),
-    )
-    conn.commit()
-
-
-def upsert_training_insight(conn: psycopg.Connection, d: date, fields: dict) -> None:
-    cols = [
-        "training_status", "training_readiness", "morning_training_readiness",
-        "endurance_score", "hill_score", "fitness_age", "running_tolerance",
-    ]
-    values = [json.dumps(fields.get(c)) for c in cols]
-    set_clause = ", ".join(f"{c} = excluded.{c}" for c in cols)
-    conn.execute(
-        f"""
-        insert into training_insight (metric_date, {", ".join(cols)}, updated_at)
-        values (%s, {", ".join(["%s"] * len(cols))}, now())
-            on conflict (metric_date) do update set
-            {set_clause},
-            updated_at = now()
-        """,  # noqa: S608 (fixed column names, not user input)
-        (d, *values),
-    )
     conn.commit()
 
 
@@ -220,17 +159,6 @@ def replace_goals(conn: psycopg.Connection, status: str, goals: list[dict]) -> N
             (status, json.dumps(g)),
         )
     conn.commit()
-
-
-def upsert_body_battery(conn: psycopg.Connection, days: list[dict]) -> None:
-    for entry in days:
-        upsert_daily_metrics(conn, date.fromisoformat(entry["date"]), {"body_battery": entry})
-
-
-def upsert_weigh_ins(conn: psycopg.Connection, weigh_in_response: dict) -> None:
-    for summary in weigh_in_response.get("dailyWeightSummaries", []):
-        d = date.fromisoformat(summary["summaryDate"])
-        upsert_daily_metrics(conn, d, {"weigh_in": summary})
 
 
 def main() -> None:
