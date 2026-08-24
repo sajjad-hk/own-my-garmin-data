@@ -1,3 +1,9 @@
+-- FROZEN. This file is no longer applied by any code path — apply_schema.py
+-- now runs schema/migrations/*.sql instead. Kept verbatim (content below
+-- unchanged) as the fixture scripts/smoke_test.py uses to simulate a
+-- pre-migrations database for adoption testing. Do not edit the SQL below;
+-- add new tables/columns as a new schema/migrations/NNNN_<domain>.sql file.
+--
 -- Token storage: lets the ephemeral GitHub Actions runner resume
 -- a Garmin session without ever storing a password.
 create table if not exists auth_tokens (
