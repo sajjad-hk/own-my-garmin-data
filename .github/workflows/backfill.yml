@@ -10,6 +10,12 @@ on:
           and body battery always backfill in full regardless of this.
         required: false
         type: string
+      domains:
+        description: >
+          Comma-separated domain keys to backfill (see domains.py). Leave
+          blank to backfill every domain currently enabled in sync_config.
+        required: false
+        type: string
 
 concurrency:
   group: garmin-backfill
@@ -39,6 +45,7 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
           BACKFILL_START_DATE: ${{ inputs.backfill_start_date }}
+          BACKFILL_DOMAINS: ${{ inputs.domains }}
 
       - name: Notify on failure
         if: failure()

@@ -7,9 +7,9 @@
 # ///
 """
 Run this ONCE, locally, to backfill history that pull.py's incremental
-lookback window doesn't cover. Safe to re-run — it skips dates whose new
-fields are already populated (see already_backfilled), so an interrupted
-run can just be restarted.
+lookback window doesn't cover. Safe to re-run — each domain's backfill
+routine (see domains.py) skips dates/records already populated, so an
+interrupted run can just be restarted.
 
 Usage:
     DATABASE_URL="postgresql://..." uv run backfill.py
@@ -22,19 +22,27 @@ Optional env vars:
                           controls how far back the per-day loop goes —
                           ~20 API calls per day now (wellness + training
                           insight, not just stats/sleep/stress/hrv/VO2max),
-                          so 2 years means ~14,600 requests. Expect this to
+                          so 2 years means ~14,600 requests, assuming all
+                          domains are enabled — fewer for a domain-scoped
+                          run (see BACKFILL_DOMAINS below). Expect this to
                           take a few hours; it's safe to stop and resume.
+    BACKFILL_DOMAINS     Comma-separated domain keys (see domains.py). Blank
+                          or unset backfills every enabled domain that has a
+                          backfill routine. Restricted to the intersection
+                          with sync_config.enabled_domains — a domain not
+                          enabled for sync is never backfilled even if named
+                          here.
 """
 
 import os
-import json
-import time
 from datetime import date, timedelta
 
 import psycopg
-from garminconnect import Garmin, GarminConnectConnectionError
+from garminconnect import Garmin
 
 from bootstrap.garmin_auth import TOKEN_DIR, load_token_from_db, save_token_to_db
+from config import get_enabled_domains
+from domains import DOMAINS, BackfillContext
 
 DB_URL = os.environ["DATABASE_URL"]
 
@@ -44,223 +52,43 @@ DEFAULT_START = (date.today() - timedelta(days=365 * 2)).isoformat()
 # default, instead of hitting date.fromisoformat("").
 START_DATE = os.environ.get("BACKFILL_START_DATE") or DEFAULT_START
 
-# Very early date — Garmin accounts don't predate this, so this safely
-# captures "everything" without needing to know the real account creation date.
-ACTIVITY_HISTORY_START = "2000-01-01"
-
-
-def upsert_activities(conn: psycopg.Connection, activities: list[dict]) -> None:
-    for a in activities:
-        conn.execute(
-            """
-            insert into activities (activity_id, raw, started_at)
-            values (%s, %s, %s)
-            on conflict (activity_id) do update set raw = excluded.raw
-            """,
-            (a["activityId"], json.dumps(a), a.get("startTimeLocal")),
-        )
-    conn.commit()
-
-
-def already_backfilled(conn: psycopg.Connection, d: date) -> bool:
-    # respiration and the training_insight row are always written together
-    # as a full batch (never partially, unlike weigh_in which is only set
-    # on days with an actual scale reading) — so their presence is a
-    # reliable "this date's new fields were already fetched" marker.
-    row = conn.execute(
-        """
-        select dm.stats is not null and dm.respiration is not null and ti.metric_date is not null
-        from daily_metrics dm
-        left join training_insight ti on ti.metric_date = dm.metric_date
-        where dm.metric_date = %s
-        """,
-        (d,),
-    ).fetchone()
-    return bool(row and row[0])
-
-
-DAILY_METRICS_COLUMNS = [
-    "stats", "sleep", "stress", "hrv", "max_metrics",
-    "respiration", "spo2", "body_battery", "body_battery_events",
-    "intensity_minutes", "floors", "steps_intraday", "heart_rates",
-    "day_events", "weigh_in",
-]
-
-
-def upsert_daily_metrics(conn: psycopg.Connection, d: date, fields: dict) -> None:
-    # Identical to ingestion/pull.py's version — keep the two in lockstep.
-    # coalesce(excluded.x, daily_metrics.x): a column not passed this call
-    # keeps whatever was already stored, rather than nulling it out.
-    cols = DAILY_METRICS_COLUMNS
-    values = [json.dumps(fields.get(c)) if fields.get(c) is not None else None for c in cols]
-    set_clause = ", ".join(f"{c} = coalesce(excluded.{c}, daily_metrics.{c})" for c in cols)
-    conn.execute(
-        f"""
-        insert into daily_metrics (metric_date, {", ".join(cols)}, updated_at)
-        values (%s, {", ".join(["%s"] * len(cols))}, now())
-            on conflict (metric_date) do update set
-            {set_clause},
-            updated_at = now()
-        """,  # noqa: S608 (fixed column names, not user input)
-        (d, *values),
-    )
-    conn.commit()
-
-
-def upsert_training_insight(conn: psycopg.Connection, d: date, fields: dict) -> None:
-    # Identical to ingestion/pull.py's version — keep the two in lockstep.
-    cols = [
-        "training_status", "training_readiness", "morning_training_readiness",
-        "endurance_score", "hill_score", "fitness_age", "running_tolerance",
-    ]
-    values = [json.dumps(fields.get(c)) for c in cols]
-    set_clause = ", ".join(f"{c} = excluded.{c}" for c in cols)
-    conn.execute(
-        f"""
-        insert into training_insight (metric_date, {", ".join(cols)}, updated_at)
-        values (%s, {", ".join(["%s"] * len(cols))}, now())
-            on conflict (metric_date) do update set
-            {set_clause},
-            updated_at = now()
-        """,  # noqa: S608 (fixed column names, not user input)
-        (d, *values),
-    )
-    conn.commit()
-
-
-def upsert_body_battery(conn: psycopg.Connection, days: list[dict]) -> None:
-    for entry in days:
-        upsert_daily_metrics(conn, date.fromisoformat(entry["date"]), {"body_battery": entry})
-
-
-def upsert_weigh_ins(conn: psycopg.Connection, weigh_in_response: dict) -> None:
-    for summary in weigh_in_response.get("dailyWeightSummaries", []):
-        d = date.fromisoformat(summary["summaryDate"])
-        upsert_daily_metrics(conn, d, {"weigh_in": summary})
-
-
-# Chunk size for range endpoints during backfill — keeps individual requests
-# small rather than asking for years in one call. weigh-ins (weight-service)
-# and body battery (wellness-service) are different backends with different
-# server-side max-range limits — a single shared constant caused
-# `API Error 400 - requested date range is too big` on body battery once a
-# real 2-year backfill exercised a range that large (weigh-ins' 90-day
-# chunks succeeded against the same account/run; body battery didn't).
-# Garmin Connect's own UI caps body battery charting at 4 weeks
-# (https://forums.garmin.com/apps-software/mobile-apps-web/f/garmin-connect-web/351559/displaying-body-battery-for-more-than-4weeks),
-# so 28 days per chunk stays safely under whatever the API enforces.
-RANGE_CHUNK_DAYS = 90
-BODY_BATTERY_CHUNK_DAYS = 28
-
-
-def backfill_range_endpoint(
-    client, start: date, today: date, label: str, fetch_and_upsert, chunk_days: int = RANGE_CHUNK_DAYS
-) -> None:
-    # chunk_days is a guess at each backend's undocumented server-side max
-    # range — it has already been wrong once (see BODY_BATTERY_CHUNK_DAYS's
-    # history). Rather than guess a new constant, shrink on the actual
-    # "requested date range is too big" 400 and keep the smaller size for
-    # subsequent chunks, so this endpoint stops needing a hand-tuned number.
-    print(f"Backfilling {label} from {start} to {today}...")
-    chunk_start = start
-    while chunk_start <= today:
-        chunk_end = min(chunk_start + timedelta(days=chunk_days - 1), today)
-        while True:
-            try:
-                fetch_and_upsert(client, chunk_start.isoformat(), chunk_end.isoformat())
-                break
-            except GarminConnectConnectionError as e:
-                if "too big" not in str(e).lower() or chunk_end == chunk_start:
-                    raise
-                chunk_days = max(1, (chunk_end - chunk_start).days // 2)
-                chunk_end = chunk_start + timedelta(days=chunk_days - 1)
-                print(f"  ...{label} range too big, shrinking chunk to {chunk_days} days and retrying")
-                time.sleep(1)
-        chunk_start = chunk_end + timedelta(days=1)
-        time.sleep(1)
-    print(f"  -> {label} done.")
-
 
 def main() -> None:
     with psycopg.connect(DB_URL) as conn:
+        enabled = get_enabled_domains(conn)
+        # Blank/unset BACKFILL_DOMAINS falls through to "all enabled" — same
+        # pattern as START_DATE above (`or ""`, not `.get(key, default)`),
+        # so a blank workflow_dispatch input doesn't need special-casing.
+        requested = os.environ.get("BACKFILL_DOMAINS") or ""
+        requested_keys = {k.strip() for k in requested.split(",") if k.strip()}
+        target_keys = (requested_keys & enabled) if requested_keys else enabled
+
+        start = date.fromisoformat(START_DATE)
+        today = date.today()
+
+        domains_to_run = [d for d in DOMAINS if d.key in target_keys and d.backfill is not None]
+        if not domains_to_run:
+            print("No domains selected for backfill (none enabled, or none have a backfill routine).")
+            return
+
+        # Only touch the token/network once we know there's actual work to do —
+        # load_token_from_db/login can refresh the on-disk token, and skipping
+        # save_token_to_db below on a no-op run would silently discard that
+        # refresh (load_token_from_db overwrites TOKEN_DIR from the DB on every
+        # run, including the next one).
         load_token_from_db(conn)
 
         client = Garmin()
         client.login(tokenstore=str(TOKEN_DIR))
 
-        print(f"Backfilling all activities since {ACTIVITY_HISTORY_START}...")
-        activities = client.get_activities_by_date(
-            ACTIVITY_HISTORY_START, date.today().isoformat(), sortorder="asc"
-        )
-        upsert_activities(conn, activities)
-        print(f"  -> {len(activities)} activities upserted.")
+        ctx = BackfillContext(client=client, conn=conn, start_date=start, today=today)
 
-        start = date.fromisoformat(START_DATE)
-        today = date.today()
-
-        backfill_range_endpoint(
-            client, start, today, "weigh-ins",
-            lambda c, s, e: upsert_weigh_ins(conn, c.get_weigh_ins(s, e)),
-        )
-        backfill_range_endpoint(
-            client, start, today, "body battery",
-            lambda c, s, e: upsert_body_battery(conn, c.get_body_battery(s, e)),
-            chunk_days=BODY_BATTERY_CHUNK_DAYS,
-        )
-
-        total_days = (today - start).days + 1
-        # 20 calls/date (5 wellness already tracked + 8 new wellness + 7
-        # training) — see docs/garmin_api_coverage.md for the full list.
-        print(
-            f"Backfilling daily metrics + training insight from {start} to {today} "
-            f"({total_days} days, ~20 API calls/day)..."
-        )
-
-        done = 0
-        skipped = 0
-        for offset in range(total_days):
-            d = start + timedelta(days=offset)
-
-            if already_backfilled(conn, d):
-                skipped += 1
-                continue
-
-            iso = d.isoformat()
-
-            upsert_daily_metrics(conn, d, {
-                "stats": client.get_stats(iso),
-                "sleep": client.get_sleep_data(iso),
-                "stress": client.get_all_day_stress(iso),
-                "hrv": client.get_hrv_data(iso),
-                "max_metrics": client.get_max_metrics(iso),
-                "respiration": client.get_respiration_data(iso),
-                "spo2": client.get_spo2_data(iso),
-                "body_battery_events": client.get_body_battery_events(iso),
-                "intensity_minutes": client.get_intensity_minutes_data(iso),
-                "floors": client.get_floors(iso),
-                "steps_intraday": client.get_steps_data(iso),
-                "heart_rates": client.get_heart_rates(iso),
-                "day_events": client.get_all_day_events(iso),
-            })
-
-            upsert_training_insight(conn, d, {
-                "training_status": client.get_training_status(iso),
-                "training_readiness": client.get_training_readiness(iso),
-                "morning_training_readiness": client.get_morning_training_readiness(iso),
-                "endurance_score": client.get_endurance_score(iso),
-                "hill_score": client.get_hill_score(iso),
-                "fitness_age": client.get_fitnessage_data(iso),
-                "running_tolerance": client.get_running_tolerance(iso, iso, aggregation="daily"),
-            })
-
-            done += 1
-            if done % 20 == 0:
-                print(f"  ...{done} days pulled, {skipped} already present, at {iso}")
-                save_token_to_db(conn)  # checkpoint token periodically on long runs
-            time.sleep(1)
+        for domain in domains_to_run:
+            print(f"=== Backfilling domain: {domain.key} ===")
+            domain.backfill(ctx)
 
         save_token_to_db(conn)
-        print(f"Done. {done} days pulled, {skipped} already present.")
+        print("Backfill complete.")
 
 
 if __name__ == "__main__":

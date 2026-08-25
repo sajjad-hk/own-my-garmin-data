@@ -12,11 +12,18 @@
 """
 Guided first-time setup (and re-auth) for garmin-data.
 
-    uv run install.py            # full first-time setup
-    uv run install.py --reauth   # just re-log-in to Garmin and push the
-                                  # refreshed token to the DB (e.g. after a
-                                  # Garmin password change) — no schema/
-                                  # secrets/backfill steps.
+    uv run install.py                     # full first-time setup
+    uv run install.py --reauth            # just re-log-in to Garmin and push the
+                                           # refreshed token to the DB (e.g. after a
+                                           # Garmin password change) — no schema/
+                                           # secrets/backfill steps.
+    uv run install.py --upgrade           # adopt/upgrade an existing install: apply
+                                           # pending migrations, add/remove domains,
+                                           # trigger a targeted backfill for newly
+                                           # enabled domains.
+    uv run install.py --domains a,b,c     # non-interactive domain selection for
+                                           # setup or --upgrade (also settable via
+                                           # GARMIN_DOMAINS).
 
 Everything here is local orchestration of steps you could also do by hand
 (see README.md) — it doesn't introduce any new credential storage.
@@ -37,8 +44,10 @@ import questionary
 from rich.console import Console
 from rich.panel import Panel
 
-from apply_schema import apply_schema
+from apply_schema import apply_schema, apply_migrations, applied_versions, list_migrations
 from bootstrap.garmin_auth import interactive_login, save_token_to_db
+from config import get_enabled_domains, set_enabled_domains
+from domains import DOMAINS, DOMAINS_BY_KEY, Domain
 
 console = Console()
 
@@ -154,6 +163,96 @@ def _print_manual_secret_instructions(database_url: str) -> None:
     ))
 
 
+def _parse_domains_arg(raw: str) -> set[str]:
+    keys = {k.strip() for k in raw.split(",") if k.strip()}
+    unknown = keys - DOMAINS_BY_KEY.keys()
+    if unknown:
+        console.print(
+            f"[red]Unknown domain(s): {', '.join(sorted(unknown))}. "
+            f"Valid: {', '.join(d.key for d in DOMAINS)}[/red]"
+        )
+        sys.exit(1)
+    return keys
+
+
+def _prompt_domain_checklist(preselected: set[str]) -> set[str]:
+    choices = []
+    last_category = None
+    for d in DOMAINS:
+        if d.category != last_category:
+            choices.append(questionary.Separator(f"-- {d.category} --"))
+            last_category = d.category
+        choices.append(questionary.Choice(
+            title=f"{d.label} — {d.description}",
+            value=d.key,
+            checked=d.key in preselected,
+        ))
+    selected = questionary.checkbox("Which data domains should this sync?", choices=choices).ask()
+    if selected is None:
+        console.print("[red]Setup cancelled.[/red]")
+        sys.exit(1)
+    return set(selected)
+
+
+def _pending_migrations(database_url: str, enabled_domains: set[str]) -> list[str]:
+    applied = applied_versions(database_url)
+    return [
+        name for version, domain, name in list_migrations()
+        if version not in applied and (domain == "base" or domain in enabled_domains)
+    ]
+
+
+def _print_whats_new(newly_available: list[Domain], pending_names: list[str]) -> None:
+    if not newly_available and not pending_names:
+        console.print("[green]Nothing new — you're fully up to date.[/green]")
+        return
+    lines = []
+    if newly_available:
+        lines.append("[bold]New domains available:[/bold]")
+        for d in newly_available:
+            lines.append(f"  • {d.label} ({d.key}) — {d.description}")
+    if pending_names:
+        if lines:
+            lines.append("")
+        lines.append("[bold]New data pending in domains you already have:[/bold]")
+        for name in pending_names:
+            lines.append(f"  • {name}")
+    console.print(Panel("\n".join(lines), title="What's new", border_style="cyan"))
+
+
+def _load_env_into_os(existing: dict) -> None:
+    for key in ("GITHUB_TOKEN", "GITHUB_REPO"):
+        if key in existing:
+            os.environ[key] = existing[key]
+
+
+def _trigger_targeted_backfill(existing: dict, domains: set[str]) -> None:
+    console.print(f"\n[bold]Triggering targeted backfill for: {', '.join(sorted(domains))}[/bold]")
+    gh_ok, gh_message = _gh_available()
+    have_pat = "GITHUB_TOKEN" in existing and "GITHUB_REPO" in existing
+    if not gh_ok or not have_pat:
+        reason = gh_message if not gh_ok else "No GitHub PAT/repo on file from a previous setup run."
+        console.print(f"[yellow]![/yellow] {reason}")
+        console.print(Panel(
+            "Trigger it by hand: [bold]Actions[/bold] tab → [bold]garmin-backfill[/bold] → "
+            f"[bold]Run workflow[/bold], with domains = {','.join(sorted(domains))}",
+            title="Manual backfill trigger", border_style="yellow",
+        ))
+        return
+
+    _load_env_into_os(existing)
+    from workflow_tools import trigger_backfill  # lazy: needs GITHUB_TOKEN/GITHUB_REPO in os.environ first
+
+    result = trigger_backfill(domains=domains)
+    if result.get("triggered"):
+        console.print(Panel.fit(f"[bold green]✓ Backfill triggered[/bold green]\n\n{result['note']}", border_style="green"))
+    else:
+        console.print(Panel(
+            f"Didn't trigger backfill: {result.get('reason')}\n{result.get('html_url', '')}",
+            title="!", border_style="yellow",
+        ))
+
+
 def _check_requirements() -> None:
     """Show a pass/warn checklist for the tools this wizard shells out to,
     and let the user bail out *before* spending time on DB setup + Garmin
@@ -208,7 +307,7 @@ def _check_requirements() -> None:
     console.print()
 
 
-def run_setup() -> None:
+def run_setup(domains_override: set[str] | None = None) -> None:
     console.print(Panel.fit(
         "[bold]garmin-data setup[/bold]\n\n"
         "This will: connect to your Neon database, log you in to Garmin, "
@@ -225,9 +324,18 @@ def run_setup() -> None:
     database_url = _prompt_db_url("Neon connection string (DATABASE_URL)", "DATABASE_URL", existing)
     _check_connection(database_url, "DATABASE_URL")
 
-    console.print("\n[bold]Applying schema...[/bold]")
+    console.print("\n[bold]Applying base schema...[/bold]")
     apply_schema(database_url)
-    console.print("[green]✓[/green] Schema applied.")
+
+    console.print("\n[bold]Choose data domains[/bold]")
+    preselected = {d.key for d in DOMAINS if d.default_enabled}
+    selected_domains = domains_override if domains_override is not None else _prompt_domain_checklist(preselected)
+
+    applied = apply_migrations(database_url, enabled_domains=selected_domains)
+    console.print(f"[green]✓[/green] Schema applied ({len(applied)} migration(s)).")
+
+    with psycopg.connect(database_url) as conn:
+        set_enabled_domains(conn, selected_domains)
 
     console.print("\n[bold]Garmin login[/bold]")
     interactive_login()
@@ -281,7 +389,7 @@ def run_setup() -> None:
 
         from workflow_tools import check_backfill_status, trigger_backfill  # lazy: needs GITHUB_TOKEN/GITHUB_REPO in os.environ first
 
-        result = trigger_backfill(start_date.strip() or None)
+        result = trigger_backfill(start_date.strip() or None, domains=selected_domains)
         if result.get("triggered"):
             status = check_backfill_status()
             console.print(Panel.fit(
@@ -333,16 +441,81 @@ def run_reauth() -> None:
     console.print("[green]✓[/green] Refreshed token saved to database. Future syncs will use it.")
 
 
+def run_upgrade(domains_override: set[str] | None = None) -> None:
+    console.print(Panel.fit(
+        "[bold]garmin-data upgrade[/bold]\n\n"
+        "Applies any pending schema migrations, lets you add (or remove) "
+        "data domains, and triggers a targeted backfill for anything newly "
+        "enabled that has history to pull.",
+        border_style="cyan",
+    ))
+    existing = _read_existing_env()
+    database_url = existing.get("DATABASE_URL") or _prompt_db_url(
+        "Neon connection string (DATABASE_URL)", "DATABASE_URL", existing
+    )
+    _check_connection(database_url, "DATABASE_URL")
+
+    console.print("\n[bold]Checking for a pre-migrations database...[/bold]")
+    apply_schema(database_url)  # creates tracker tables + adopts an existing DB if needed
+
+    with psycopg.connect(database_url) as conn:
+        current_enabled = get_enabled_domains(conn)
+
+    newly_available = [d for d in DOMAINS if d.key not in current_enabled]
+    pending_names = _pending_migrations(database_url, current_enabled)
+    _print_whats_new(newly_available, pending_names)
+
+    selected_domains = domains_override if domains_override is not None else _prompt_domain_checklist(current_enabled)
+
+    applied = apply_migrations(database_url, enabled_domains=selected_domains)
+
+    with psycopg.connect(database_url) as conn:
+        set_enabled_domains(conn, selected_domains)
+
+    if applied:
+        console.print(f"[green]✓[/green] Applied {len(applied)} migration(s): {', '.join(applied)}")
+    else:
+        console.print("[green]✓[/green] Nothing pending — already up to date.")
+
+    newly_enabled = selected_domains - current_enabled
+    backfillable = {k for k in newly_enabled if DOMAINS_BY_KEY[k].backfill is not None}
+
+    if not newly_enabled:
+        console.print("No new domains enabled.")
+    elif not backfillable:
+        console.print(
+            f"[green]✓[/green] Enabled {', '.join(sorted(newly_enabled))} — "
+            "snapshot-only, no backfill needed. The next scheduled sync will populate them."
+        )
+    else:
+        _trigger_targeted_backfill(existing, backfillable)
+
+    _print_manual_next_steps()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--reauth", action="store_true", help="Re-authenticate to Garmin only, skip full setup.")
+    parser.add_argument(
+        "--upgrade", action="store_true",
+        help="Adopt/upgrade an existing install: apply pending migrations, enable new domains, trigger a targeted backfill.",
+    )
+    parser.add_argument(
+        "--domains", type=str, default=None,
+        help="Comma-separated domain keys (see domains.py), bypasses the interactive checklist (setup and --upgrade). Also settable via GARMIN_DOMAINS.",
+    )
     args = parser.parse_args()
+
+    raw_domains = args.domains or os.environ.get("GARMIN_DOMAINS")
+    domains_override = _parse_domains_arg(raw_domains) if raw_domains else None
 
     try:
         if args.reauth:
             run_reauth()
+        elif args.upgrade:
+            run_upgrade(domains_override=domains_override)
         else:
-            run_setup()
+            run_setup(domains_override=domains_override)
     except KeyboardInterrupt:
         console.print("\n[yellow]Cancelled.[/yellow]")
         sys.exit(1)
