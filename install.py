@@ -564,7 +564,7 @@ def run_coach_loop_optin(database_url: str, existing: dict[str, str]) -> None:
         _write_env(env_updates)
         console.print(Panel(
             "Written to .env:\n  " + "\n  ".join(env_updates) + "\n\n"
-            "• COACH_DATABASE_URL → set it on your MCP server (run_write_sql).\n"
+            "• COACH_DATABASE_URL → set it as WRITE_DATABASE_URL on your postgres-mcp server (enables run_write_sql).\n"
             "• SCHEDULER_DATABASE_URL → used by seed_workouts.py / sync_schedule.py.\n"
             "• Approvals use your existing DATABASE_URL: uv run plan_admin.py list",
             title="Coach loop credentials", border_style="green",

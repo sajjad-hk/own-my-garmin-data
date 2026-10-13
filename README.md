@@ -149,7 +149,7 @@ JSON) operators let you reach into those payloads from plain SQL.
 
 ### Want Claude to be able to query this for you?
 
-See the separate [`postgres-mcp`](#) project (fill in your link) — it's
+See the separate [`postgres-mcp`](https://github.com/sajjad-hk/postgres-mcp) project — it's
 a small, standalone MCP server you point at this same database, using a
 read-only role you create there. It's optional and lives outside this
 repo entirely; this repo doesn't need it, describe, or embed any part of
@@ -187,7 +187,7 @@ make the coach exceed its grants.
 |---|---|---|---|---|
 | Ingestion | read | owner `DATABASE_URL` (unchanged — no separate ingestion role) | daily CI schedule | reads Garmin → ingestion tables |
 | MCP read tool | none | your MCP read role (e.g. `bk_garmin_data_mcp_reader`) | interactive | SELECT (never `auth_tokens`) |
-| MCP write tool ("coach") | none | `COACH_DATABASE_URL` | interactive | writes `training_plan`, `protocols` |
+| MCP write tool ("coach") | none | `COACH_DATABASE_URL`, set as `WRITE_DATABASE_URL` on postgres-mcp | interactive | writes `training_plan`, `protocols` |
 | Enactor (`seed_workouts.py`, `sync_schedule.py`) | write | `SCHEDULER_DATABASE_URL` | **manual** | uploads/schedules; writes the ledger + enactment columns |
 | Approval CLI (`plan_admin.py`) | — | owner `DATABASE_URL` | **manual** | the only thing that can approve |
 
@@ -215,7 +215,9 @@ make the coach exceed its grants.
 ### The order things happen in
 
 1. Ingestion syncs your library and calendar (the `workouts` domain).
-2. The coach writes `training_plan` / `protocols` through `run_write_sql`.
+2. The coach writes `training_plan` / `protocols` through postgres-mcp's
+   `run_write_sql` tool (enabled by setting this repo's `COACH_DATABASE_URL`
+   as `WRITE_DATABASE_URL` on the MCP server).
 3. You review and approve: `uv run plan_admin.py list`, then
    `uv run plan_admin.py approve --id N` (or `--date YYYY-MM-DD`). It shows
    exactly what it's about to approve and asks you to type `yes` (or pass
