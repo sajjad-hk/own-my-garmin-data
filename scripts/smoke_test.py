@@ -635,6 +635,9 @@ def test_coach_tables_are_self_describing() -> None:
             return conn.execute("select obj_description(%s::regclass, 'pg_class')", (table,)).fetchone()[0] or ""
         assert "run_write_sql" in comment("training_plan") and "approve" in comment("training_plan")
         assert "params" in comment("protocols")
+        assert "BAR_HOLDS" in comment("protocols") and "weight_kg" in comment("protocols")
+        assert "plan_admin.py approve" in comment("training_plan") and "publish" in comment("training_plan")
+        assert "--id N" not in comment("training_plan"), "old approve wording"
         for t in ("workouts", "scheduled_workouts", "generated_workouts"):
             assert "READ-ONLY" in comment(t), t
         undocumented = [r[0] for r in conn.execute(
