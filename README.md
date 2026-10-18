@@ -230,6 +230,11 @@ Each exercise: `category` + `exercise` from `exercise_catalog` (required),
 to 50 characters shown on the watch (use "L"/"R" with two consecutive
 entries for per-side work). No supersets or pyramids yet.
 
+- **Hangboard sessions** are strength workouts too, so the load is recorded:
+  one entry per grip with `CARRY/BAR_HOLDS` timed holds (`time_s` = hang,
+  `sets` = hangs, `rest_s`, `weight_kg` = added load, `note` = grip/edge).
+  Assisted (below bodyweight) loads go in the note only. `kind='other'` stays
+  as the unweighted interval timer.
 - Exercise names come from `exercise_catalog` (Garmin's public catalogue,
   refreshed weekly by the `workouts` sync). The seed refuses any protocol
   with an unknown (category, exercise) pair or a malformed exercise, and
