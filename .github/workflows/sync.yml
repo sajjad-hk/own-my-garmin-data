@@ -2,7 +2,7 @@ name: garmin-sync
 
 on:
   schedule:
-    - cron: '0 6 * * *'   # daily 06:00 UTC — adjust to your timezone
+    - cron: '17 8 * * *'  # daily 08:17 UTC (10:17 Warsaw summer / 09:17 winter). Odd minute: GitHub delays on-the-hour schedules most (observed 4–7.5 h); leaves slack before the 16:00 coach brief
   workflow_dispatch: {}    # manual "Run workflow" button in the Actions tab
 
 jobs:
