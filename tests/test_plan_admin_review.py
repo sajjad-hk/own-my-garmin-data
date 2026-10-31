@@ -72,3 +72,19 @@ def test_publish_needs_the_scheduler_login(monkeypatch):
     monkeypatch.delenv("SCHEDULER_DATABASE_URL", raising=False)
     run = _Runner([])
     assert plan_admin.publish(run=run) == 1 and run.calls == []
+
+
+def test_pair_block_summary_names_both_sides():
+    pair = {"sets": 3, "pair": [
+        {"category": "ROW", "exercise": "DUMBBELL_ROW", "reps": 10, "weight_kg": 12, "rest_s": 30, "note": "L"},
+        {"category": "ROW", "exercise": "DUMBBELL_ROW", "reps": 10, "weight_kg": 12, "rest_s": 90, "note": "R"}]}
+    assert plan_admin._exercise_summary(pair) == "DUMBBELL_ROW L/R 3×10 @12kg"
+    superset = {"sets": 4, "pair": [{"category": "PULL_UP", "exercise": "PULL_UP", "reps": 5},
+                                    {"category": "PUSH_UP", "exercise": "PUSH_UP", "time_s": 30}]}
+    assert plan_admin._exercise_summary(superset) == "PULL_UP 4×5 + PUSH_UP 4×30s"
+
+
+def test_malformed_pair_falls_back_to_the_name():
+    bad = {"kind": "strength", "name": "Odd", "description": None,
+           "params": {"exercises": [{"sets": 3, "pair": [{"exercise": "DUMBBELL_ROW", "reps": 10}]}]}}
+    assert "Odd" in plan_admin.label(_view(7, TODAY, protocol=bad))
