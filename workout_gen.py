@@ -13,6 +13,11 @@ sets > 1 is UNVERIFIED: it emits `sets` sibling repeat groups separated by
 a timed rest step. No hand-built multi-set workout has been reflected yet
 to confirm Garmin's shape (plan Task 0).
 
+Each set's repeat group is preceded by a "Get ready" timed rest step
+(ready_s, default 5 s, 0 = off) so a set never starts the instant the lap
+button is pressed. Also UNVERIFIED (a `rest` step outside a repeat) until
+a live upload round-trip confirms Garmin keeps it.
+
 BUILDERS is the `kind` seam protocols.build() dispatches on: "other"
 (interval workouts) and "strength" (see the strength section below).
 """
@@ -38,13 +43,14 @@ _NO_STROKE = {"strokeTypeId": 0, "strokeTypeKey": None, "displayOrder": 0}
 _NO_EQUIPMENT = {"equipmentTypeId": 0, "equipmentTypeKey": None, "displayOrder": 0}
 
 
-def _executable(order: int, step_type: str, condition: dict, value: float, child_step_id: int | None) -> dict:
+def _executable(order: int, step_type: str, condition: dict, value: float, child_step_id: int | None,
+                description: str | None = None) -> dict:
     return {
         "type": "ExecutableStepDTO",
         "stepOrder": order,
         "stepType": dict(_STEP_TYPES[step_type]),
         "childStepId": child_step_id,
-        "description": None,
+        "description": description,
         "endCondition": dict(condition),
         "endConditionValue": float(value),
         "preferredEndConditionUnit": None,
@@ -88,14 +94,18 @@ def _repeat(order: int, child_step_id: int, reps: int, steps: list[dict]) -> dic
     }
 
 
-def _multi_set_steps(first_order: int, *, work_s, rest_s, reps, sets, set_rest_s) -> tuple[list[dict], int]:
-    """Repeat groups (plus UNVERIFIED between-set rests). Returns (steps, last_order_used)."""
+def _multi_set_steps(first_order: int, *, work_s, rest_s, reps, sets, set_rest_s, ready_s) -> tuple[list[dict], int]:
+    """Repeat groups (plus UNVERIFIED between-set rests and "Get ready" steps).
+    Returns (steps, last_order_used)."""
     steps: list[dict] = []
     order = first_order - 1
     for set_no in range(1, sets + 1):
         if set_no > 1:
             order += 1
             steps.append(_executable(order, "rest", _TIME, set_rest_s, None))
+        if ready_s > 0:
+            order += 1
+            steps.append(_executable(order, "rest", _TIME, ready_s, None, description=_READY_DESCRIPTION))
         order += 1
         group_order = order
         order += 1
@@ -117,12 +127,15 @@ def make_other_workout(
     set_rest_s: float = 180.0,
     warmup_s: float = 300.0,
     cooldown_s: float = 300.0,
+    ready_s: float = 5.0,
 ) -> dict:
     if reps < 1 or sets < 1:
         raise ValueError(f"reps and sets must be >= 1 (got reps={reps}, sets={sets})")
+    _validate_ready(ready_s)
 
     steps = [_executable(1, "warmup", _LAP_BUTTON, warmup_s, None)]
-    body, last = _multi_set_steps(2, work_s=work_s, rest_s=rest_s, reps=reps, sets=sets, set_rest_s=set_rest_s)
+    body, last = _multi_set_steps(2, work_s=work_s, rest_s=rest_s, reps=reps, sets=sets, set_rest_s=set_rest_s,
+                                ready_s=ready_s)
     steps += body
     steps.append(_executable(last + 1, "cooldown", _LAP_BUTTON, cooldown_s, None))
 
