@@ -227,8 +227,7 @@ Garmin **Strength** workouts with `kind='strength'`:
 Each exercise: `category` + `exercise` from `exercise_catalog` (required),
 `sets` ≥ 1, exactly one of `reps` / `time_s`, optional `weight_kg`,
 `rest_s` in seconds (omit = rest until the lap button), and a `note` of up
-to 50 characters shown on the watch (use "L"/"R" with two consecutive
-entries for per-side work). No supersets or pyramids yet.
+to 50 characters shown on the watch. No pyramids or drop sets yet.
 
 - **Hangboard sessions** are strength workouts too, so the load is recorded:
   one entry per grip with `CARRY/BAR_HOLDS` timed holds (`time_s` = hang,
@@ -242,6 +241,24 @@ entries for per-side work). No supersets or pyramids yet.
 - After a strength session and a sync, `activity_exercise_set_rows` has one
   row per set (reps, `weight_kg`, duration, detected exercise). Weights
   arrive from Garmin in grams and are converted to kg.
+- **Per-side work and supersets** use a pair block,
+  `{"sets": 3, "pair": [A, B]}`. The watch then alternates A, B, A, B… Each
+  item has its own `rest_s`.
+- **Countdown:** every timed hold, and every set of a `kind='other'` timer,
+  starts with a 5 s "Get ready" step, so you can get on the board after
+  pressing lap. Set `"ready_s": 0` to turn it off, or up to 15 s.
+- **How-to links:** `exercise_catalog.display_name` and `video_url` (a
+  YouTube search for the exercise's form) give the coach readable names and
+  a link that always works for previews.
+- **Weekly rhythm:** the coach plans on a fixed weekly schedule:
+  - on Sunday evening it prepares next week's menu as protocols
+    (`menu_week`), with a table explaining each exercise;
+  - on each gym day it picks the session that today's recovery supports
+    and writes one plan row for you to approve.
+
+  Paste-ready text is in
+  [docs/coach/project-instructions-additions.md](docs/coach/project-instructions-additions.md)
+  and [docs/coach/scheduled-tasks.md](docs/coach/scheduled-tasks.md).
 
 Add this to the coach's Project instructions:
 
