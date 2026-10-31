@@ -49,11 +49,24 @@ def seed_default_protocols(conn: psycopg.Connection) -> int:
     return len(DEFAULT_PROTOCOLS)
 
 
+def exercise_pairs(params: dict | None) -> list[tuple[str | None, str | None]]:
+    """Every (category, exercise) a strength protocol names, in order —
+    single exercises and both items of each pair block. Non-objects are
+    skipped (the builder reports those)."""
+    out = []
+    for e in (params or {}).get("exercises") or []:
+        if not isinstance(e, dict):
+            continue
+        items = e.get("pair") if "pair" in e else [e]
+        out += [(i.get("category"), i.get("exercise")) for i in items or [] if isinstance(i, dict)]
+    return out
+
+
 def strength_problems(conn: psycopg.Connection, params: dict) -> list[str]:
     """(category, exercise) pairs Garmin won't accept, checked against the
     synced exercise_catalog. An empty catalogue refuses everything rather
     than letting an unvalidated payload reach Garmin."""
-    pairs = [(e.get("category"), e.get("exercise")) for e in (params or {}).get("exercises") or [] if isinstance(e, dict)]
+    pairs = exercise_pairs(params)
     if not pairs:
         return []
     if not conn.execute("select exists (select 1 from exercise_catalog)").fetchone()[0]:

@@ -1,6 +1,6 @@
 import pytest
 
-from protocols import DEFAULT_PROTOCOLS, build
+from protocols import DEFAULT_PROTOCOLS, build, exercise_pairs
 from workout_gen import make_other_workout
 
 
@@ -37,3 +37,14 @@ def test_protocol_problems_never_raises_on_absurd_numbers():
     params = {"exercises": [{"category": "PULL_UP", "exercise": "PULL_UP", "sets": 10**400, "reps": 5}]}
     problems = protocol_problems(None, "strength", "x", None, params)
     assert problems and isinstance(problems[0], str)
+
+
+def test_exercise_pairs_flattens_singles_and_pairs():
+    params = {"exercises": [
+        {"category": "PULL_UP", "exercise": "WEIGHTED_PULL_UP", "sets": 4, "reps": 3},
+        {"sets": 3, "pair": [{"category": "ROW", "exercise": "DUMBBELL_ROW", "reps": 10},
+                             {"category": "PUSH_UP", "exercise": "PUSH_UP", "reps": 10}, "junk"]},
+        "junk",
+    ]}
+    assert exercise_pairs(params) == [("PULL_UP", "WEIGHTED_PULL_UP"), ("ROW", "DUMBBELL_ROW"), ("PUSH_UP", "PUSH_UP")]
+    assert exercise_pairs({}) == [] and exercise_pairs(None) == []

@@ -118,6 +118,69 @@ def test_ready_s_accepts_bounds(ok):
     make_strength_workout("x", None, exercises=[HANG], ready_s=ok)
 
 
+def _pair_reference():
+    """The athlete's hand-built L/R reference, minus what they typed rather than
+    the shape: notes on the rest steps, weightValue 0.0 ("no weight" in the
+    UI — we send None, as the single-exercise reference does), and a stray
+    kilometer unit Connect's editor left on one of the two timed rests (the
+    other, and Bear Essentials' timed rests, have None)."""
+    w = _norm(_strip(json.loads((FIXTURES / "strength_pair_reference.json").read_text())))
+    for s in _flatten(w["workoutSegments"][0]["workoutSteps"]):
+        if s.get("stepType", {}).get("stepTypeKey") == "rest":
+            s["description"] = None
+            s["preferredEndConditionUnit"] = None
+        if s.get("weightValue") == 0.0:
+            s["weightValue"] = None
+    return w
+
+
+ROW_PAIR = {"sets": 3, "pair": [
+    {"category": "ROW", "exercise": "DUMBBELL_ROW", "reps": 10, "rest_s": 30},
+    {"category": "ROW", "exercise": "DUMBBELL_ROW", "reps": 10, "rest_s": 90},
+]}
+
+
+def test_pair_matches_hand_built_reference():
+    got = make_strength_workout("Strength Workout lr test ", None, exercises=[ROW_PAIR], ready_s=0)
+    assert got == _pair_reference()
+
+
+def test_pair_carries_weight_and_notes_per_item():
+    pair = {"sets": 3, "pair": [{**ROW_PAIR["pair"][0], "weight_kg": 12, "note": "L"},
+                                {**ROW_PAIR["pair"][1], "weight_kg": 12, "note": "R"}]}
+    a, _, b, _ = _group_steps(make_strength_workout("x", None, exercises=[pair]))
+    assert (a["description"], a["weightValue"], b["description"], b["weightValue"]) == ("L", 12.0, "R", 12.0)
+
+
+def test_pair_of_timed_holds_gets_ready_before_each_side():
+    hang = {"category": "CARRY", "exercise": "BAR_HOLDS", "time_s": 7}
+    w = make_strength_workout("x", None, exercises=[
+        HANG, {"sets": 3, "pair": [{**hang, "note": "L"}, {**hang, "note": "R"}]}])
+    steps = _group_steps(w, index=2)
+    kinds = [("ready" if s.get("description") == "Get ready" else s["exerciseName"] or "rest") for s in steps]
+    assert kinds == ["ready", "BAR_HOLDS", "rest", "ready", "BAR_HOLDS", "rest"]
+    assert {s["childStepId"] for s in steps} == {2}
+    assert all(s["endCondition"]["conditionTypeKey"] == "lap.button" for s in (steps[2], steps[5]))
+    orders = [s["stepOrder"] for s in _flatten(w["workoutSegments"][0]["workoutSteps"])]
+    assert orders == sorted(orders) and len(set(orders)) == len(orders)
+
+
+_ITEM = {"category": "ROW", "exercise": "DUMBBELL_ROW", "reps": 10}
+
+
+@pytest.mark.parametrize("block, fragment", [
+    ({"sets": 3, "pair": [_ITEM]}, "exactly 2"),
+    ({"sets": 3, "pair": [_ITEM, _ITEM, _ITEM]}, "exactly 2"),
+    ({"sets": 3, "pair": [_ITEM, {**_ITEM, "sets": 3}]}, r"block 1, item 2.*sets"),
+    ({"pair": [_ITEM, _ITEM]}, r"block 1.*sets"),
+    ({"sets": 3, "pair": [_ITEM, _ITEM], "exercise": "DUMBBELL_ROW"}, "unknown key"),
+    ({"sets": 3, "pair": [{**_ITEM, "time_s": 30}, _ITEM]}, "block 1, item 1"),
+])
+def test_pair_rejects_bad_shapes(block, fragment):
+    with pytest.raises(ValueError, match=fragment):
+        make_strength_workout("x", None, exercises=[block])
+
+
 @pytest.mark.parametrize("bad, fragment", [
     ({"exercises": []}, "at least one exercise"),
     ({"exercises": [{"category": "PULL_UP", "exercise": "PULL_UP", "sets": 3, "reps": 5, "weight": 10}]}, "weight"),

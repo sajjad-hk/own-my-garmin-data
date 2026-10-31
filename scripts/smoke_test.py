@@ -793,13 +793,17 @@ def test_seed_validates_strength_protocols() -> None:
     good = {"exercises": [{"category": "PULL_UP", "exercise": "WEIGHTED_PULL_UP", "sets": 4, "reps": 3, "weight_kg": 10, "rest_s": 180}]}
     bad_pair = {"exercises": [{"category": "ROW", "exercise": "PULL_UP", "sets": 3, "reps": 5}]}
     bad_shape = {"exercises": [{"category": "PULL_UP", "exercise": "PULL_UP", "sets": 3, "reps": 5, "weight": 10}]}
+    bad_in_pair = {"exercises": [{"sets": 3, "pair": [
+        {"category": "PULL_UP", "exercise": "PULL_UP", "reps": 5},
+        {"category": "ROW", "exercise": "NOT_AN_EXERCISE", "reps": 5}]}]}
     with psycopg.connect(DB_URL) as conn:  # catalogue as ingestion would have it
         conn.execute("insert into exercise_catalog (category, exercise) values ('PULL_UP','WEIGHTED_PULL_UP'), ('PULL_UP','PULL_UP')")
         conn.commit()
     with psycopg.connect(coach_url) as conn:
         ids = []
         for slug, params, day in (("s-good", good, tomorrow), ("s-pair", bad_pair, tomorrow + timedelta(days=1)),
-                                  ("s-shape", bad_shape, tomorrow + timedelta(days=2))):
+                                  ("s-shape", bad_shape, tomorrow + timedelta(days=2)),
+                                  ("s-pairbad", bad_in_pair, tomorrow + timedelta(days=3))):
             conn.execute("insert into protocols (slug, name, kind, params) values (%s, %s, 'strength', %s)",
                          (slug, slug, json.dumps(params)))
             ids.append(conn.execute(
@@ -813,6 +817,7 @@ def test_seed_validates_strength_protocols() -> None:
         joined = " | ".join(notes)
         assert "s-pair" in joined and "ROW/PULL_UP" in joined, notes
         assert "s-shape" in joined and "weight" in joined, notes
+        assert "s-pairbad" in joined and "ROW/NOT_AN_EXERCISE" in joined, notes
         fake = FakeGarmin()
         seed_workouts.run(conn, lambda: contextlib.nullcontext(fake), today=date.today(), confirm=_yes)
     assert len(fake.uploads) == 1
