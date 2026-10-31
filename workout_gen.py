@@ -183,6 +183,11 @@ def make_other_workout(
 # work is two consecutive exercises with note "L"/"R" — Garmin has no
 # left/right flag. Exercise names must come from Garmin's catalogue; that's
 # checked against exercise_catalog at seed time, not here (this stays pure).
+#
+# A timed hold (time_s) starts the moment the previous step ends — often a
+# lap press while the athlete is still off the board — so each one gets a
+# short "Get ready" rest step (ready_s, default 5) first, inside its repeat.
+# UNVERIFIED against a hand-built workout; checked by a live round-trip.
 
 SPORT_STRENGTH = {"sportTypeId": 5, "sportTypeKey": "strength_training", "displayOrder": 3}
 _REPS = {"conditionTypeId": 10, "conditionTypeKey": "reps", "displayOrder": 10, "displayable": True}
@@ -191,6 +196,8 @@ _KILOMETER = {"unitId": 2, "unitKey": "kilometer", "factor": 100000.0}
 
 STRENGTH_EXERCISE_KEYS = frozenset({"category", "exercise", "sets", "reps", "time_s", "weight_kg", "rest_s", "note"})
 _NOTE_MAX = 50
+READY_MAX_S = 15
+_READY_DESCRIPTION = "Get ready"
 
 
 def _strength_step(order: int, step_type: str, *, child: int | None, category: str | None,
@@ -232,6 +239,11 @@ def _is_number(v) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 
+def _validate_ready(ready_s) -> None:
+    if not _is_number(ready_s) or not 0 <= ready_s <= READY_MAX_S:
+        raise ValueError(f"ready_s must be a number of seconds from 0 (off) to {READY_MAX_S} (got {ready_s!r})")
+
+
 def _validate_strength(exercises, warmup) -> None:
     if warmup not in ("lap", None):
         raise ValueError(f"warmup must be \"lap\" or null (got {warmup!r})")
@@ -270,8 +282,10 @@ def make_strength_workout(
     *,
     exercises: list[dict],
     warmup: str | None = "lap",
+    ready_s: float = 5,
 ) -> dict:
     _validate_strength(exercises, warmup)
+    _validate_ready(ready_s)
 
     steps: list[dict] = []
     order = 0
@@ -282,6 +296,11 @@ def make_strength_workout(
     for group_no, ex in enumerate(exercises, 1):
         order += 1
         group_order = order
+        group_steps = []
+        if ex.get("time_s") is not None and ready_s > 0:
+            order += 1
+            group_steps.append(_strength_step(order, "rest", child=group_no, category=None, exercise=None,
+                                              condition=_TIME, value=ready_s, description=_READY_DESCRIPTION))
         order += 1
         if ex.get("reps") is not None:
             condition, value = _REPS, ex["reps"]
@@ -301,7 +320,7 @@ def make_strength_workout(
             "stepType": dict(_STEP_TYPES["repeat"]),
             "childStepId": group_no,
             "numberOfIterations": ex["sets"],
-            "workoutSteps": [work, rest],
+            "workoutSteps": [*group_steps, work, rest],
             "endConditionValue": float(ex["sets"]),
             "preferredEndConditionUnit": None,
             "endConditionCompare": None,

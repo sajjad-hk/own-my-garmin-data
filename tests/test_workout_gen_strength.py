@@ -35,7 +35,7 @@ def _norm(obj):
 
 def test_matches_reference_field_for_field():
     expected = _norm(_strip(json.loads((FIXTURES / "strength_reference.json").read_text())))
-    got = make_strength_workout("testing workout for coaching ", None, exercises=REFERENCE_EXERCISES)
+    got = make_strength_workout("testing workout for coaching ", None, exercises=REFERENCE_EXERCISES, ready_s=0)
     assert got == expected
 
 
@@ -48,7 +48,7 @@ def test_timed_rests_match_bear_essentials():
         exercises.append({"category": ex["category"], "exercise": ex["exerciseName"], "sets": g["numberOfIterations"],
                           "reps": int(ex["endConditionValue"]), "rest_s": rest["endConditionValue"],
                           **({"weight_kg": ex["weightValue"]} if ex["weightValue"] is not None else {})})
-    got = make_strength_workout("Bear Essentials", None, exercises=exercises, warmup=None)
+    got = make_strength_workout("Bear Essentials", None, exercises=exercises, warmup=None, ready_s=0)
     assert got["workoutSegments"][0]["workoutSteps"] == groups
 
 
@@ -68,6 +68,7 @@ def _flatten(steps):
 
 
 def test_step_orders_unique_increasing_and_child_ids_per_group():
+    # PLANK is timed, so its groups carry the default countdown step too.
     w = make_strength_workout("x", None, exercises=REFERENCE_EXERCISES * 2)
     steps = w["workoutSegments"][0]["workoutSteps"]
     orders = [s["stepOrder"] for s in _flatten(steps)]
@@ -76,6 +77,45 @@ def test_step_orders_unique_increasing_and_child_ids_per_group():
     assert [g["childStepId"] for g in groups] == list(range(1, 7))
     for g in groups:
         assert {c["childStepId"] for c in g["workoutSteps"]} == {g["childStepId"]}
+
+
+HANG = {"category": "CARRY", "exercise": "BAR_HOLDS", "sets": 3, "time_s": 10, "weight_kg": 6}
+
+
+def _group_steps(w, index=1):
+    return w["workoutSegments"][0]["workoutSteps"][index]["workoutSteps"]
+
+
+def test_timed_hold_gets_ready_step_inside_its_repeat():
+    ready, hold, rest = _group_steps(make_strength_workout("x", None, exercises=[HANG]))
+    assert ready["stepType"]["stepTypeKey"] == "rest"
+    assert ready["endCondition"]["conditionTypeKey"] == "time" and ready["endConditionValue"] == 5.0
+    assert ready["description"] == "Get ready"
+    assert ready["category"] is None and ready["exerciseName"] is None
+    assert hold["exerciseName"] == "BAR_HOLDS" and hold["endConditionValue"] == 10.0
+    assert rest["stepType"]["stepTypeKey"] == "rest" and rest["endCondition"]["conditionTypeKey"] == "lap.button"
+
+
+def test_rep_exercise_has_no_ready_step():
+    steps = _group_steps(make_strength_workout("x", None, exercises=[
+        {"category": "ROW", "exercise": "DUMBBELL_ROW", "sets": 2, "reps": 8}]))
+    assert [s["exerciseName"] for s in steps] == ["DUMBBELL_ROW", None]
+
+
+def test_ready_s_zero_turns_it_off():
+    steps = _group_steps(make_strength_workout("x", None, exercises=[HANG], ready_s=0))
+    assert [s["exerciseName"] for s in steps] == ["BAR_HOLDS", None]
+
+
+@pytest.mark.parametrize("bad", ["5", True, -1, 20])
+def test_ready_s_rejects_bad_values(bad):
+    with pytest.raises(ValueError, match="ready_s"):
+        make_strength_workout("x", None, exercises=[HANG], ready_s=bad)
+
+
+@pytest.mark.parametrize("ok", [0, 15])
+def test_ready_s_accepts_bounds(ok):
+    make_strength_workout("x", None, exercises=[HANG], ready_s=ok)
 
 
 @pytest.mark.parametrize("bad, fragment", [
