@@ -90,11 +90,20 @@ def _num(value) -> str:
     return f"{value:g}" if isinstance(value, (int, float)) and not isinstance(value, bool) else str(value)
 
 
-def _exercise_summary(ex: dict) -> str:
-    sets = _num(ex.get("sets"))
+def _item_target(ex: dict, sets) -> str:
     target = f"{sets}×{_num(ex['reps'])}" if ex.get("reps") is not None else f"{sets}×{_num(ex.get('time_s'))}s"
     weight = f" @{_num(ex['weight_kg'])}kg" if ex.get("weight_kg") is not None else ""
-    return f"{ex.get('exercise')} {target}{weight}"
+    return f"{target}{weight}"
+
+
+def _exercise_summary(ex: dict) -> str:
+    sets = _num(ex.get("sets"))
+    if "pair" in ex:  # alternating block: one exercise per side, or a superset
+        a, b = ex["pair"]
+        if (a.get("exercise"), _item_target(a, sets)) == (b.get("exercise"), _item_target(b, sets)):
+            return f"{a.get('exercise')} L/R {_item_target(a, sets)}"
+        return f"{a.get('exercise')} {_item_target(a, sets)} + {b.get('exercise')} {_item_target(b, sets)}"
+    return f"{ex.get('exercise')} {_item_target(ex, sets)}"
 
 
 def _summary(v: planning.PlanView) -> str:
@@ -111,7 +120,7 @@ def _summary(v: planning.PlanView) -> str:
             return f"{name} — {len(exercises)} exercises ({shown}{more})"
         if p.get("kind") == "other":
             return f"{name} — {_num(params.get('work_s'))}s on / {_num(params.get('rest_s'))}s off ×{_num(params.get('reps'))}"
-    except (AttributeError, KeyError, TypeError):
+    except (AttributeError, KeyError, TypeError, ValueError):
         pass  # odd params: fall back to the name; the seed reports what's wrong
     return name
 

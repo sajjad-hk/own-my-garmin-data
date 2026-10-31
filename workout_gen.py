@@ -13,6 +13,11 @@ sets > 1 is UNVERIFIED: it emits `sets` sibling repeat groups separated by
 a timed rest step. No hand-built multi-set workout has been reflected yet
 to confirm Garmin's shape (plan Task 0).
 
+Each set's repeat group is preceded by a "Get ready" timed rest step
+(ready_s, default 5 s, 0 = off) so a set never starts the instant the lap
+button is pressed. Also UNVERIFIED (a `rest` step outside a repeat) until
+a live upload round-trip confirms Garmin keeps it.
+
 BUILDERS is the `kind` seam protocols.build() dispatches on: "other"
 (interval workouts) and "strength" (see the strength section below).
 """
@@ -38,13 +43,14 @@ _NO_STROKE = {"strokeTypeId": 0, "strokeTypeKey": None, "displayOrder": 0}
 _NO_EQUIPMENT = {"equipmentTypeId": 0, "equipmentTypeKey": None, "displayOrder": 0}
 
 
-def _executable(order: int, step_type: str, condition: dict, value: float, child_step_id: int | None) -> dict:
+def _executable(order: int, step_type: str, condition: dict, value: float, child_step_id: int | None,
+                description: str | None = None) -> dict:
     return {
         "type": "ExecutableStepDTO",
         "stepOrder": order,
         "stepType": dict(_STEP_TYPES[step_type]),
         "childStepId": child_step_id,
-        "description": None,
+        "description": description,
         "endCondition": dict(condition),
         "endConditionValue": float(value),
         "preferredEndConditionUnit": None,
@@ -88,14 +94,18 @@ def _repeat(order: int, child_step_id: int, reps: int, steps: list[dict]) -> dic
     }
 
 
-def _multi_set_steps(first_order: int, *, work_s, rest_s, reps, sets, set_rest_s) -> tuple[list[dict], int]:
-    """Repeat groups (plus UNVERIFIED between-set rests). Returns (steps, last_order_used)."""
+def _multi_set_steps(first_order: int, *, work_s, rest_s, reps, sets, set_rest_s, ready_s) -> tuple[list[dict], int]:
+    """Repeat groups (plus UNVERIFIED between-set rests and "Get ready" steps).
+    Returns (steps, last_order_used)."""
     steps: list[dict] = []
     order = first_order - 1
     for set_no in range(1, sets + 1):
         if set_no > 1:
             order += 1
             steps.append(_executable(order, "rest", _TIME, set_rest_s, None))
+        if ready_s > 0:
+            order += 1
+            steps.append(_executable(order, "rest", _TIME, ready_s, None, description=_READY_DESCRIPTION))
         order += 1
         group_order = order
         order += 1
@@ -117,12 +127,15 @@ def make_other_workout(
     set_rest_s: float = 180.0,
     warmup_s: float = 300.0,
     cooldown_s: float = 300.0,
+    ready_s: float = 5.0,
 ) -> dict:
     if reps < 1 or sets < 1:
         raise ValueError(f"reps and sets must be >= 1 (got reps={reps}, sets={sets})")
+    _validate_ready(ready_s)
 
     steps = [_executable(1, "warmup", _LAP_BUTTON, warmup_s, None)]
-    body, last = _multi_set_steps(2, work_s=work_s, rest_s=rest_s, reps=reps, sets=sets, set_rest_s=set_rest_s)
+    body, last = _multi_set_steps(2, work_s=work_s, rest_s=rest_s, reps=reps, sets=sets, set_rest_s=set_rest_s,
+                                ready_s=ready_s)
     steps += body
     steps.append(_executable(last + 1, "cooldown", _LAP_BUTTON, cooldown_s, None))
 
@@ -179,10 +192,17 @@ def make_other_workout(
 # and Bear Essentials (timed rests; tests/fixtures/bear_essentials.json).
 # tests/test_workout_gen_strength.py pins both field for field.
 #
-# One repeat group per exercise: (exercise step, rest step) x sets. Per-side
-# work is two consecutive exercises with note "L"/"R" — Garmin has no
-# left/right flag. Exercise names must come from Garmin's catalogue; that's
+# One repeat group per exercise: (exercise step, rest step) x sets. A pair
+# block ({"sets", "pair": [A, B]}) is one repeat group of (A, rest A, B,
+# rest B) x sets, so the watch alternates sides — copied from the athlete's
+# hand-built L/R reference (tests/fixtures/strength_pair_reference.json).
+# Garmin has no left/right flag; the note ("L"/"R") carries it. Exercise names must come from Garmin's catalogue; that's
 # checked against exercise_catalog at seed time, not here (this stays pure).
+#
+# A timed hold (time_s) starts the moment the previous step ends — often a
+# lap press while the athlete is still off the board — so each one gets a
+# short "Get ready" rest step (ready_s, default 5) first, inside its repeat.
+# UNVERIFIED against a hand-built workout; checked by a live round-trip.
 
 SPORT_STRENGTH = {"sportTypeId": 5, "sportTypeKey": "strength_training", "displayOrder": 3}
 _REPS = {"conditionTypeId": 10, "conditionTypeKey": "reps", "displayOrder": 10, "displayable": True}
@@ -190,7 +210,11 @@ _KILOGRAM = {"unitId": 8, "unitKey": "kilogram", "factor": 1000.0}
 _KILOMETER = {"unitId": 2, "unitKey": "kilometer", "factor": 100000.0}
 
 STRENGTH_EXERCISE_KEYS = frozenset({"category", "exercise", "sets", "reps", "time_s", "weight_kg", "rest_s", "note"})
+STRENGTH_ITEM_KEYS = STRENGTH_EXERCISE_KEYS - {"sets"}
+STRENGTH_PAIR_KEYS = frozenset({"sets", "pair"})
 _NOTE_MAX = 50
+READY_MAX_S = 15
+_READY_DESCRIPTION = "Get ready"
 
 
 def _strength_step(order: int, step_type: str, *, child: int | None, category: str | None,
@@ -232,36 +256,88 @@ def _is_number(v) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 
+def _validate_ready(ready_s) -> None:
+    if not _is_number(ready_s) or not 0 <= ready_s <= READY_MAX_S:
+        raise ValueError(f"ready_s must be a number of seconds from 0 (off) to {READY_MAX_S} (got {ready_s!r})")
+
+
+def _validate_sets(block: dict, where: str) -> None:
+    sets = block.get("sets")
+    if not isinstance(sets, int) or isinstance(sets, bool) or sets < 1:
+        raise ValueError(f"{where}: sets must be an integer >= 1")
+
+
+def _validate_item(item, where: str, allowed: frozenset) -> None:
+    if not isinstance(item, dict):
+        raise ValueError(f"{where}: must be an object")
+    unknown = set(item) - allowed
+    if unknown:
+        raise ValueError(f"{where}: unknown key(s) {sorted(unknown)}; allowed: {sorted(allowed)}")
+    for key in ("category", "exercise"):
+        if not isinstance(item.get(key), str) or not item[key].strip():
+            raise ValueError(f"{where}: {key} must be a non-empty Garmin catalogue name")
+    has_reps, has_time = item.get("reps") is not None, item.get("time_s") is not None
+    if has_reps == has_time:
+        raise ValueError(f"{where}: give exactly one of reps / time_s")
+    if has_reps and (not isinstance(item["reps"], int) or isinstance(item["reps"], bool) or item["reps"] < 1):
+        raise ValueError(f"{where}: reps must be an integer >= 1")
+    if has_time and (not _is_number(item["time_s"]) or item["time_s"] <= 0):
+        raise ValueError(f"{where}: time_s must be > 0 seconds")
+    for key in ("weight_kg", "rest_s"):
+        if item.get(key) is not None and (not _is_number(item[key]) or item[key] <= 0):
+            raise ValueError(f"{where}: {key} must be > 0 (or omitted)")
+    note = item.get("note")
+    if note is not None and (not isinstance(note, str) or len(note) > _NOTE_MAX):
+        raise ValueError(f"{where}: note must be text of at most {_NOTE_MAX} characters")
+
+
 def _validate_strength(exercises, warmup) -> None:
     if warmup not in ("lap", None):
         raise ValueError(f"warmup must be \"lap\" or null (got {warmup!r})")
     if not isinstance(exercises, list) or not exercises:
         raise ValueError("a strength protocol needs at least one exercise")
     for i, ex in enumerate(exercises, 1):
-        where = f"exercise {i}"
-        if not isinstance(ex, dict):
-            raise ValueError(f"{where}: must be an object")
-        unknown = set(ex) - STRENGTH_EXERCISE_KEYS
-        if unknown:
-            raise ValueError(f"{where}: unknown key(s) {sorted(unknown)}; allowed: {sorted(STRENGTH_EXERCISE_KEYS)}")
-        for key in ("category", "exercise"):
-            if not isinstance(ex.get(key), str) or not ex[key].strip():
-                raise ValueError(f"{where}: {key} must be a non-empty Garmin catalogue name")
-        if not isinstance(ex.get("sets"), int) or isinstance(ex.get("sets"), bool) or ex["sets"] < 1:
-            raise ValueError(f"{where}: sets must be an integer >= 1")
-        has_reps, has_time = ex.get("reps") is not None, ex.get("time_s") is not None
-        if has_reps == has_time:
-            raise ValueError(f"{where}: give exactly one of reps / time_s")
-        if has_reps and (not isinstance(ex["reps"], int) or isinstance(ex["reps"], bool) or ex["reps"] < 1):
-            raise ValueError(f"{where}: reps must be an integer >= 1")
-        if has_time and (not _is_number(ex["time_s"]) or ex["time_s"] <= 0):
-            raise ValueError(f"{where}: time_s must be > 0 seconds")
-        for key in ("weight_kg", "rest_s"):
-            if ex.get(key) is not None and (not _is_number(ex[key]) or ex[key] <= 0):
-                raise ValueError(f"{where}: {key} must be > 0 (or omitted)")
-        note = ex.get("note")
-        if note is not None and (not isinstance(note, str) or len(note) > _NOTE_MAX):
-            raise ValueError(f"{where}: note must be text of at most {_NOTE_MAX} characters")
+        if isinstance(ex, dict) and "pair" in ex:
+            where = f"block {i}"
+            unknown = set(ex) - STRENGTH_PAIR_KEYS
+            if unknown:
+                raise ValueError(f"{where}: unknown key(s) {sorted(unknown)}; a pair block has only {sorted(STRENGTH_PAIR_KEYS)}")
+            _validate_sets(ex, where)
+            if not isinstance(ex["pair"], list) or len(ex["pair"]) != 2:
+                raise ValueError(f"{where}: pair must list exactly 2 exercises")
+            for j, item in enumerate(ex["pair"], 1):
+                item_where = f"{where}, item {j}"
+                if isinstance(item, dict) and "sets" in item:
+                    raise ValueError(f"{item_where}: sets belongs to the block, not the item")
+                _validate_item(item, item_where, STRENGTH_ITEM_KEYS)
+        else:
+            where = f"exercise {i}"
+            _validate_item(ex, where, STRENGTH_EXERCISE_KEYS)
+            _validate_sets(ex, where)
+
+
+def _item_steps(order: int, child: int, item: dict, ready_s: float) -> tuple[list[dict], int]:
+    """[get ready (timed holds only)], work, rest for one exercise. Returns
+    (steps, last_order_used)."""
+    steps = []
+    if item.get("time_s") is not None and ready_s > 0:
+        order += 1
+        steps.append(_strength_step(order, "rest", child=child, category=None, exercise=None,
+                                    condition=_TIME, value=ready_s, description=_READY_DESCRIPTION))
+    order += 1
+    if item.get("reps") is not None:
+        condition, value = _REPS, item["reps"]
+    else:
+        condition, value = _TIME, item["time_s"]
+    steps.append(_strength_step(order, "interval", child=child, category=item["category"], exercise=item["exercise"],
+                                condition=condition, value=value, weight_kg=item.get("weight_kg"),
+                                description=item.get("note") or "", preferred_unit=_KILOMETER))
+    order += 1
+    rest_s = item.get("rest_s")
+    steps.append(_strength_step(order, "rest", child=child, category=None, exercise=None,
+                                condition=_TIME if rest_s is not None else _LAP_BUTTON,
+                                value=rest_s if rest_s is not None else 0.0))
+    return steps, order
 
 
 def make_strength_workout(
@@ -270,8 +346,10 @@ def make_strength_workout(
     *,
     exercises: list[dict],
     warmup: str | None = "lap",
+    ready_s: float = 5,
 ) -> dict:
     _validate_strength(exercises, warmup)
+    _validate_ready(ready_s)
 
     steps: list[dict] = []
     order = 0
@@ -282,26 +360,17 @@ def make_strength_workout(
     for group_no, ex in enumerate(exercises, 1):
         order += 1
         group_order = order
-        order += 1
-        if ex.get("reps") is not None:
-            condition, value = _REPS, ex["reps"]
-        else:
-            condition, value = _TIME, ex["time_s"]
-        work = _strength_step(order, "interval", child=group_no, category=ex["category"], exercise=ex["exercise"],
-                              condition=condition, value=value, weight_kg=ex.get("weight_kg"),
-                              description=ex.get("note") or "", preferred_unit=_KILOMETER)
-        order += 1
-        rest_s = ex.get("rest_s")
-        rest = _strength_step(order, "rest", child=group_no, category=None, exercise=None,
-                              condition=_TIME if rest_s is not None else _LAP_BUTTON,
-                              value=rest_s if rest_s is not None else 0.0)
+        group_steps = []
+        for item in ex["pair"] if "pair" in ex else [ex]:
+            item_steps, order = _item_steps(order, group_no, item, ready_s)
+            group_steps += item_steps
         steps.append({
             "type": "RepeatGroupDTO",
             "stepOrder": group_order,
             "stepType": dict(_STEP_TYPES["repeat"]),
             "childStepId": group_no,
             "numberOfIterations": ex["sets"],
-            "workoutSteps": [work, rest],
+            "workoutSteps": group_steps,
             "endConditionValue": float(ex["sets"]),
             "preferredEndConditionUnit": None,
             "endConditionCompare": None,

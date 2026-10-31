@@ -645,6 +645,15 @@ def test_coach_tables_are_self_describing() -> None:
             "and a.attnum > 0 and not a.attisdropped and col_description(a.attrelid, a.attnum) is null"
         ).fetchall()]
         assert undocumented == [], f"training_plan columns without comments: {undocumented}"
+        for word in ("pair", "ready_s", "Lattice", "menu_week"):
+            assert word in comment("protocols"), word
+        assert "video_url" in comment("exercise_catalog")
+        assert "Get ready" in comment("activity_exercise_set_rows")
+        for table, col in (("protocols", "menu_week"), ("exercise_catalog", "video_url"),
+                           ("exercise_catalog", "display_name")):
+            assert conn.execute("select col_description(%s::regclass, a.attnum) from pg_attribute a "
+                                "where a.attrelid = %s::regclass and a.attname = %s",
+                                (table, table, col)).fetchone()[0], f"{table}.{col} has no comment"
     print("test_coach_tables_are_self_describing: PASS")
 
 
@@ -677,6 +686,41 @@ def test_strength_schema_and_view() -> None:
         (1, "REST", None, None, Decimal("120.0"), None, None, None),
     ], rows
     print("test_strength_schema_and_view: PASS")
+
+
+def test_coach_feedback_schema() -> None:
+    """0013: video links / display names on the catalogue (generated, so they
+    survive the weekly upsert), protocols.menu_week writable by the coach and
+    invisible to approvals."""
+    import re
+    coach_url, _sched_url = _setup_coach_loop()
+    today = date.today()
+    with psycopg.connect(DB_URL) as conn:
+        assert domains._refresh_exercise_catalog(conn, today) > 0
+    with psycopg.connect(coach_url) as conn:
+        row = conn.execute("select display_name, video_url from exercise_catalog where exercise = 'DUMBBELL_ROW'").fetchone()
+        assert row == ("Dumbbell Row", "https://www.youtube.com/results?search_query=dumbbell+row+exercise+form"), row
+        urls = [r[0] for r in conn.execute("select video_url from exercise_catalog").fetchall()]
+        assert urls and all(re.fullmatch(r"https://www\.youtube\.com/results\?search_query=[a-z0-9+]+", u) for u in urls), urls
+        monday = today + timedelta(days=7 - today.weekday())
+        conn.execute("insert into protocols (slug, name, kind, params) values ('menu-a', 'Menu A', 'strength', %s)",
+                     (json.dumps({"exercises": [{"category": "PLANK", "exercise": "PLANK", "sets": 3, "time_s": 30}]}),))
+
+        def proto_hash():
+            kind, name, description, params = conn.execute(
+                "select kind, name, description, params from protocols where slug = 'menu-a'").fetchone()
+            return planning.protocol_hash(kind, name, description, params)
+        before = proto_hash()
+        conn.execute("update protocols set menu_week = %s where slug = 'menu-a'", (monday,))
+        assert conn.execute("select menu_week from protocols where slug = 'menu-a'").fetchone()[0] == monday
+        assert proto_hash() == before, "menu_week must not change the protocol hash"
+    with psycopg.connect(DB_URL) as conn:  # weekly refresh (upsert) keeps the generated columns filled
+        conn.execute("update exercise_catalog set synced_at = now() - interval '8 days'")
+        conn.commit()
+        assert domains._refresh_exercise_catalog(conn, today) > 0
+        assert conn.execute("select count(*) from exercise_catalog where video_url is null or display_name is null"
+                            ).fetchone()[0] == 0
+    print("test_coach_feedback_schema: PASS")
 
 
 def test_exercise_catalog_refresh_keeps_rows_on_failure() -> None:
@@ -749,13 +793,17 @@ def test_seed_validates_strength_protocols() -> None:
     good = {"exercises": [{"category": "PULL_UP", "exercise": "WEIGHTED_PULL_UP", "sets": 4, "reps": 3, "weight_kg": 10, "rest_s": 180}]}
     bad_pair = {"exercises": [{"category": "ROW", "exercise": "PULL_UP", "sets": 3, "reps": 5}]}
     bad_shape = {"exercises": [{"category": "PULL_UP", "exercise": "PULL_UP", "sets": 3, "reps": 5, "weight": 10}]}
+    bad_in_pair = {"exercises": [{"sets": 3, "pair": [
+        {"category": "PULL_UP", "exercise": "PULL_UP", "reps": 5},
+        {"category": "ROW", "exercise": "NOT_AN_EXERCISE", "reps": 5}]}]}
     with psycopg.connect(DB_URL) as conn:  # catalogue as ingestion would have it
         conn.execute("insert into exercise_catalog (category, exercise) values ('PULL_UP','WEIGHTED_PULL_UP'), ('PULL_UP','PULL_UP')")
         conn.commit()
     with psycopg.connect(coach_url) as conn:
         ids = []
         for slug, params, day in (("s-good", good, tomorrow), ("s-pair", bad_pair, tomorrow + timedelta(days=1)),
-                                  ("s-shape", bad_shape, tomorrow + timedelta(days=2))):
+                                  ("s-shape", bad_shape, tomorrow + timedelta(days=2)),
+                                  ("s-pairbad", bad_in_pair, tomorrow + timedelta(days=3))):
             conn.execute("insert into protocols (slug, name, kind, params) values (%s, %s, 'strength', %s)",
                          (slug, slug, json.dumps(params)))
             ids.append(conn.execute(
@@ -769,6 +817,7 @@ def test_seed_validates_strength_protocols() -> None:
         joined = " | ".join(notes)
         assert "s-pair" in joined and "ROW/PULL_UP" in joined, notes
         assert "s-shape" in joined and "weight" in joined, notes
+        assert "s-pairbad" in joined and "ROW/NOT_AN_EXERCISE" in joined, notes
         fake = FakeGarmin()
         seed_workouts.run(conn, lambda: contextlib.nullcontext(fake), today=date.today(), confirm=_yes)
     assert len(fake.uploads) == 1
@@ -909,6 +958,7 @@ def main() -> None:
     test_read_only_install_has_no_coach_config()
     test_coach_tables_are_self_describing()
     test_strength_schema_and_view()
+    test_coach_feedback_schema()
     test_exercise_catalog_refresh_keeps_rows_on_failure()
     test_exercise_sets_fetch_if_missing()
     test_seed_validates_strength_protocols()
